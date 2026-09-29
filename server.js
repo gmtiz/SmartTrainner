@@ -12,6 +12,10 @@ const { createClient } = require('@libsql/client');
 
 const app = express();
 app.disable('x-powered-by');
+// Detrás del proxy del hosting, req.ip tiene que ser la IP real del usuario:
+// si no, todos comparten el mismo contador de intentos (y se bloquean entre sí).
+// TRUST_PROXY=0 si el servidor está expuesto directo, sin proxy adelante.
+app.set('trust proxy', Number(process.env.TRUST_PROXY ?? 1));
 app.use(express.json({ limit: '2mb' }));
 
 // Cabeceras de seguridad básicas (sin dependencias extra).
@@ -19,6 +23,23 @@ app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   res.setHeader('Referrer-Policy', 'same-origin');
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  // Solo se cargan scripts propios y de las versiones fijas de unpkg; los datos
+  // solo pueden viajar a nuestro propio servidor.
+  res.setHeader('Content-Security-Policy', [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com",
+    "img-src 'self' data: blob: https:",
+    "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'self'"
+  ].join('; '));
   next();
 });
 app.use(express.static('public'));
@@ -30,8 +51,28 @@ const db = createClient({
 });
 
 const uid = () => crypto.randomBytes(9).toString('hex');
-const codigo = () => crypto.randomBytes(5).toString('hex'); // link corto del alumno
-const hoy = () => new Date().toISOString().slice(0, 10);
+// Link del alumno: 16 caracteres (64 bits). Los links viejos de 10 siguen andando.
+const codigo = () => crypto.randomBytes(8).toString('hex');
+// "Hoy" es el día de Argentina, no el de Greenwich: si no, después de las 21 h
+// la app ya vivía en el día siguiente.
+const ZONA = process.env.ZONA_HORARIA || 'America/Argentina/Buenos_Aires';
+const formatoDia = new Intl.DateTimeFormat('en-CA', { timeZone: ZONA, year: 'numeric', month: '2-digit', day: '2-digit' });
+const hoy = () => formatoDia.format(new Date());
+
+/* Duración del plan: vence el mismo día del mes siguiente.
+   dia_cobro guarda el día original, para que un alta del 31 no se corra:
+   31/01 -> 28/02 -> 31/03 -> 30/04 ... */
+const diasDelMes = (a, m) => new Date(Date.UTC(a, m, 0)).getUTCDate();   // m: 1 a 12
+function sumarMes(fecha, ancla) {
+  const [a, m, d] = String(fecha).split('-').map(Number);
+  const na = m === 12 ? a + 1 : a, nm = m === 12 ? 1 : m + 1;
+  const dia = Math.min(ancla || d, diasDelMes(na, nm));
+  return `${na}-${String(nm).padStart(2, '0')}-${String(dia).padStart(2, '0')}`;
+}
+const aUTC = f => { const [a, m, d] = String(f).split('-').map(Number); return Date.UTC(a, m - 1, d); };
+const diasEntre = (desde, hasta) => Math.round((aUTC(hasta) - aUTC(desde)) / 864e5);
+const diaDe = f => Number(String(f).slice(8, 10));
+const VENTANA_RENOVAR = 7;   // días antes del vencimiento en que ya se puede renovar
 const ahora = () => new Date().toISOString();
 const ruta = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -144,7 +185,10 @@ const COLUMNAS = [
   ['plantilla_items', 'peso_sugerido', 'TEXT'],
   // Marca los ejercicios que vienen de ejemplo, para poder borrarlos de una.
   ['ejercicios', 'ejemplo', 'INTEGER'],
-  ['grupos', 'ejemplo', 'INTEGER']
+  ['grupos', 'ejemplo', 'INTEGER'],
+  // Plan mensual: cuándo vence y qué día del mes se cobra.
+  ['clientes', 'vence', 'TEXT'],
+  ['clientes', 'dia_cobro', 'INTEGER']
 ];
 
 async function prepararBase() {
@@ -164,6 +208,19 @@ async function prepararBase() {
     if (!ya.rows.length)
       await db.execute({ sql: 'INSERT INTO grupos (id, cuenta_id, nombre) VALUES (?,?,?)',
         args: [crypto.randomBytes(9).toString('hex'), g.cuenta_id, String(g.grupo).trim()] });
+  }
+  // Alumnos cargados antes del plan mensual: se les calcula el vencimiento una vez.
+  // Como "Renovar" no movía la fecha, muchos tienen un arranque viejo: se los ubica
+  // en su ciclo actual (mismo día de cobro) para que no aparezcan todos vencidos.
+  const sinVence = await db.execute(
+    `SELECT id, inicio FROM clientes WHERE vence IS NULL AND inicio IS NOT NULL AND inicio <> ''`);
+  for (const c of sinVence.rows) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(c.inicio))) continue;
+    const ancla = diaDe(c.inicio), h = hoy();
+    let desde = String(c.inicio), vence = sumarMes(desde, ancla), vueltas = 0;
+    while (vence < h && vueltas++ < 600) { desde = vence; vence = sumarMes(vence, ancla); }
+    await db.execute({ sql: 'UPDATE clientes SET inicio = ?, vence = ?, dia_cobro = ? WHERE id = ?',
+      args: [desde, vence, ancla, c.id] });
   }
   console.log('Base lista.');
 }
@@ -290,6 +347,20 @@ async function enviarMail({ para, asunto, texto, html }) {
 
 const SECRET = process.env.JWT_SECRET;
 if (!SECRET) { console.error('Falta JWT_SECRET'); process.exit(1); }
+if (SECRET.length < 32)
+  console.warn('AVISO: JWT_SECRET es corto. Usá uno de 32 caracteres o más (ej: openssl rand -hex 32).');
+const JWT_OPC = { algorithm: 'HS256', expiresIn: '30d' };
+const firmar = datos => jwt.sign(datos, SECRET, JWT_OPC);
+
+// Link de la app para los mails. Nunca se arma con el Host que manda el navegador:
+// alguien podría pedir la recuperación de otro con un Host falso y quedarse con el link.
+const URL_APP = (process.env.URL_APP || '').replace(/\/+$/, '');
+if (!URL_APP) console.warn('AVISO: falta URL_APP (ej: https://smarttrainner.com). Sin eso no se mandan mails con links.');
+const escaparHtml = t => String(t == null ? '' : t)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+const CLAVE_MAX = 128;   // bcrypt solo mira los primeros 72 bytes; más largo es gasto sin sentido
+// Hash de relleno: si el mail no existe se compara igual, así la demora no delata qué mails están registrados.
+const HASH_RELLENO = bcrypt.hashSync(crypto.randomBytes(16).toString('hex'), 12);
 
 /* ------------------------------------------------------------------
    CAPA DE DATOS
@@ -308,6 +379,9 @@ const semanaDe = (inicio, fecha) => {
   if (!isFinite(dias)) return 1;
   return Math.max(1, Math.min(999, Math.floor(dias / 7) + 1));
 };
+
+// Arranque del ciclo para filtrar lo anotado. Si la fecha es futura o no hay, no filtra.
+const desdeCiclo = inicio => (inicio && esFecha(inicio) && inicio <= hoy()) ? inicio : '0000-01-01';
 
 const data = {
   async q(sql, args = []) { return (await db.execute({ sql, args })).rows; },
@@ -436,10 +510,12 @@ const data = {
     let token = codigo();
     while ((await data.q('SELECT id FROM clientes WHERE token = ?', [token])).length) token = codigo();
     await data.run(
-      `INSERT INTO clientes (id, cuenta_id, nombre, contacto, inicio, token, peso_inicial, altura, notas)
-       VALUES (?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO clientes (id, cuenta_id, nombre, contacto, inicio, token, peso_inicial, altura, notas,
+                             vence, dia_cobro)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
       [id, cuentaId, String(nombre).trim(), contacto || null, inicio || hoy(), token,
-       peso_inicial ? Number(peso_inicial) : null, altura ? Number(altura) : null, notas || null]);
+       peso_inicial ? Number(peso_inicial) : null, altura ? Number(altura) : null, notas || null,
+       sumarMes(inicio || hoy()), diaDe(inicio || hoy())]);
 
     // El peso inicial queda también como primer punto del seguimiento.
     if (peso_inicial)
@@ -454,15 +530,47 @@ const data = {
         'INSERT INTO turnos (id, cuenta_id, cliente_id, dia_semana, hora, duracion, nota) VALUES (?,?,?,?,?,?,?)',
         [uid(), cuentaId, id, Number(t.dia_semana), t.hora, Number(t.duracion) || 60, t.nota || null]);
     }
-    return { id, nombre, contacto, inicio: inicio || hoy(), token };
+    return { id, nombre, contacto, inicio: inicio || hoy(), token,
+             vence: sumarMes(inicio || hoy()), dia_cobro: diaDe(inicio || hoy()) };
   },
 
-  editarCliente: (cuentaId, id, { nombre, contacto, inicio, peso_inicial, altura, notas }) =>
-    data.run(
-      `UPDATE clientes SET nombre = ?, contacto = ?, inicio = ?, peso_inicial = ?, altura = ?, notas = ?
+  // Si el PT cambia la fecha de arranque, el vencimiento se recalcula desde ahí.
+  // Si la deja igual, se respeta el vencimiento que ya tenía (por ejemplo, tras renovar).
+  async editarCliente(cuentaId, id, { nombre, contacto, inicio, peso_inicial, altura, notas }) {
+    const antes = await data.cliente(cuentaId, id);
+    let vence = antes ? antes.vence : null, dia = antes ? antes.dia_cobro : null;
+    if (!inicio) { vence = null; dia = null; }
+    else if (!antes || inicio !== antes.inicio || !vence) { vence = sumarMes(inicio); dia = diaDe(inicio); }
+    return data.run(
+      `UPDATE clientes SET nombre = ?, contacto = ?, inicio = ?, peso_inicial = ?, altura = ?, notas = ?,
+                           vence = ?, dia_cobro = ?
         WHERE id = ? AND cuenta_id = ?`,
       [String(nombre).trim(), contacto || null, inicio || null,
-       peso_inicial ? Number(peso_inicial) : null, altura ? Number(altura) : null, notas || null, id, cuentaId]),
+       peso_inicial ? Number(peso_inicial) : null, altura ? Number(altura) : null, notas || null,
+       vence, dia, id, cuentaId]);
+  },
+
+  /* Renovar el plan (el alumno pagó otro mes).
+     - Desde 7 días antes del vencimiento y hasta 7 días después: el mes nuevo se suma
+       al vencimiento anterior, así el día de cobro no se corre.
+     - Más de 7 días vencido: arranca de cero desde hoy.
+     - Antes de la ventana no se toca nada (sirve para cambiar la rutina a mitad de mes).
+     El ciclo nuevo cuenta sus semanas desde hoy. */
+  async renovarPlan(cuentaId, clienteId) {
+    const c = await data.cliente(cuentaId, clienteId);
+    if (!c) return null;
+    const h = hoy();
+    let vence, dia;
+    if (c.vence && esFecha(c.vence)) {
+      const faltan = diasEntre(h, c.vence);
+      if (faltan > VENTANA_RENOVAR) return { renovado: false, inicio: c.inicio, vence: c.vence, faltan };
+      if (faltan >= -VENTANA_RENOVAR) { dia = c.dia_cobro || diaDe(c.vence); vence = sumarMes(c.vence, dia); }
+    }
+    if (!vence) { dia = diaDe(h); vence = sumarMes(h, dia); }
+    await data.run('UPDATE clientes SET inicio = ?, vence = ?, dia_cobro = ? WHERE id = ? AND cuenta_id = ?',
+      [h, vence, dia, clienteId, cuentaId]);
+    return { renovado: true, inicio: h, vence, faltan: diasEntre(h, vence) };
+  },
 
   borrarCliente: (cuentaId, id) =>
     data.run('UPDATE clientes SET activo = 0 WHERE id = ? AND cuenta_id = ?', [id, cuentaId]),
@@ -962,9 +1070,10 @@ const data = {
   },
 
   // Lo anotado en la semana en curso: es lo que el alumno ve al abrir su rutina.
-  seriesDeLaSemana: (cuentaId, clienteId, semana) =>
-    data.q(`SELECT * FROM series_log WHERE cuenta_id = ? AND cliente_id = ? AND semana = ?
-             ORDER BY fecha, item_id, numero`, [cuentaId, clienteId, semana]),
+  // "desde" es el arranque del ciclo: la semana 1 de este mes no se mezcla con la del anterior.
+  seriesDeLaSemana: (cuentaId, clienteId, semana, desde) =>
+    data.q(`SELECT * FROM series_log WHERE cuenta_id = ? AND cliente_id = ? AND semana = ? AND fecha >= ?
+             ORDER BY fecha, item_id, numero`, [cuentaId, clienteId, semana, desdeCiclo(desde)]),
 
   /* --- observaciones del alumno, una por ejercicio y día --- */
   async guardarObservacion(cliente, { item_id, ejercicio_id, texto }) {
@@ -994,9 +1103,9 @@ const data = {
     return { ok: true, texto: limpio };
   },
 
-  observacionesDeLaSemana: (cuentaId, clienteId, semana) =>
-    data.q('SELECT * FROM observaciones WHERE cuenta_id = ? AND cliente_id = ? AND semana = ?',
-      [cuentaId, clienteId, semana]),
+  observacionesDeLaSemana: (cuentaId, clienteId, semana, desde) =>
+    data.q('SELECT * FROM observaciones WHERE cuenta_id = ? AND cliente_id = ? AND semana = ? AND fecha >= ?',
+      [cuentaId, clienteId, semana, desdeCiclo(desde)]),
 
   /* --- indicaciones del entrenador --- */
   indicacionActiva: async (cuentaId, clienteId) =>
@@ -1207,9 +1316,11 @@ const data = {
 const MAIL_OK = /^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$/;
 const intentos = new Map();   // ip -> { n, hasta }
 
-function limitar(clave, max, minutos) {
+// soloMirar = true: dice si todavía hay margen, sin sumar un intento.
+function limitar(clave, max, minutos, soloMirar = false) {
   const ahoraMs = Date.now();
   const reg = intentos.get(clave);
+  if (soloMirar) return !(reg && reg.hasta > ahoraMs && reg.n >= max);
   if (reg && reg.hasta > ahoraMs) {
     if (reg.n >= max) return false;
     reg.n++;
@@ -1230,7 +1341,7 @@ async function auth(req, res, next) {
   const token = h.startsWith('Bearer ') ? h.slice(7) : null;
   if (!token) return res.status(401).json({ error: 'Falta iniciar sesión.' });
   let datos;
-  try { datos = jwt.verify(token, SECRET); }
+  try { datos = jwt.verify(token, SECRET, { algorithms: ['HS256'] }); }
   catch { return res.status(401).json({ error: 'La sesión venció. Volvé a entrar.' }); }
 
   const cuenta = await data.cuenta(datos.cuentaId);
@@ -1260,6 +1371,13 @@ app.post('/api/registro', ruta(async (req, res) => {
   if (!MAIL_OK.test(mail)) return res.status(400).json({ error: 'Ese mail no parece válido.' });
   if (String(password).length < 8)
     return res.status(400).json({ error: 'La contraseña tiene que tener al menos 8 caracteres.' });
+  if (String(password).length > CLAVE_MAX)
+    return res.status(400).json({ error: `La contraseña puede tener hasta ${CLAVE_MAX} caracteres.` });
+  if (mail.length > 254 || String(nombre).trim().length > 80)
+    return res.status(400).json({ error: 'El nombre o el mail son demasiado largos.' });
+  // Freno general de intentos: evita que prueben mails en masa para ver cuáles existen.
+  if (!limitar('regint:' + req.ip, 40, 60))
+    return res.status(429).json({ error: 'Demasiados intentos desde esta conexión. Probá en un rato.' });
   if ((await data.q('SELECT id FROM cuentas WHERE email = ?', [mail])).length)
     return res.status(409).json({ error: 'Ya hay una cuenta con ese mail.' });
   // Se cuentan solo las cuentas creadas de verdad: varios entrenadores pueden compartir
@@ -1275,7 +1393,7 @@ app.post('/api/registro', ruta(async (req, res) => {
   await data.run('INSERT INTO cuentas (id, email, password, nombre, rol, creada) VALUES (?,?,?,?,?,?)',
     [id, mail, bcrypt.hashSync(password, 12), String(nombre).trim(), esAdmin ? 'admin' : 'pt', hoy()]);
   await cargarEjemplos(id);
-  res.json({ token: jwt.sign({ cuentaId: id, v: 0 }, SECRET, { expiresIn: '30d' }),
+  res.json({ token: firmar({ cuentaId: id, v: 0 }),
              nombre: String(nombre).trim(), rol: esAdmin ? 'admin' : 'pt' });
 }));
 
@@ -1284,11 +1402,13 @@ app.post('/api/login', ruta(async (req, res) => {
   const clave = 'log:' + req.ip + ':' + mail;
   if (!limitar(clave, 8, 15))
     return res.status(429).json({ error: 'Muchos intentos fallidos. Esperá unos minutos.' });
+  const pass = String((req.body || {}).password || '').slice(0, CLAVE_MAX);
   const c = (await data.q('SELECT * FROM cuentas WHERE email = ?', [mail]))[0];
-  if (!c || !bcrypt.compareSync((req.body || {}).password || '', c.password))
+  const coincide = bcrypt.compareSync(pass, c ? c.password : HASH_RELLENO);
+  if (!c || !coincide)
     return res.status(401).json({ error: 'Mail o contraseña incorrectos.' });
   limpiarLimite(clave);
-  res.json({ token: jwt.sign({ cuentaId: c.id, v: c.sesion_version || 0 }, SECRET, { expiresIn: '30d' }),
+  res.json({ token: firmar({ cuentaId: c.id, v: c.sesion_version || 0 }),
              nombre: c.nombre, rol: c.rol });
 }));
 
@@ -1323,8 +1443,11 @@ app.post('/api/recuperar', ruta(async (req, res) => {
     'INSERT INTO recuperaciones (id, cuenta_id, token_hash, creado, expira) VALUES (?,?,?,?,?)',
     [uid(), c.id, hashToken(token), ahora(), expira]);
 
-  const base = process.env.URL_APP || ('https://' + (req.headers.host || 'smarttrainner'));
-  const link = base + '/?recuperar=' + token;
+  if (!URL_APP) {
+    console.error('No se mandó el mail de recuperación: falta URL_APP. Generá el link desde el panel de admin.');
+    return res.json(respuesta);
+  }
+  const link = URL_APP + '/?recuperar=' + token;
   try {
     await enviarMail({
       para: c.email,
@@ -1332,7 +1455,7 @@ app.post('/api/recuperar', ruta(async (req, res) => {
       texto: `Hola ${c.nombre}:\n\nEntrá acá para poner una contraseña nueva:\n${link}\n\n` +
              `El link vence en una hora y se puede usar una sola vez.\n` +
              `Si no pediste esto, ignorá el mail: tu contraseña sigue igual.`,
-      html: `<p>Hola ${c.nombre}:</p><p><a href="${link}">Poné una contraseña nueva</a></p>` +
+      html: `<p>Hola ${escaparHtml(c.nombre)}:</p><p><a href="${escaparHtml(link)}">Poné una contraseña nueva</a></p>` +
             `<p>El link vence en una hora y se usa una sola vez. Si no lo pediste, ignoralo.</p>`
     });
   } catch (e) { console.error('No pudimos mandar el mail de recuperación:', e.message); }
@@ -1344,6 +1467,8 @@ app.post('/api/recuperar/confirmar', ruta(async (req, res) => {
   const { token, nueva } = req.body || {};
   if (String(nueva || '').length < 8)
     return res.status(400).json({ error: 'La contraseña nueva tiene que tener al menos 8 caracteres.' });
+  if (String(nueva).length > CLAVE_MAX)
+    return res.status(400).json({ error: `La contraseña puede tener hasta ${CLAVE_MAX} caracteres.` });
   if (!limitar('recconf:' + req.ip, 20, 60))
     return res.status(429).json({ error: 'Demasiados intentos. Esperá un rato.' });
 
@@ -1369,7 +1494,8 @@ app.post('/api/admin/cuentas/:id/recuperacion', auth, soloAdmin, ruta(async (req
   await data.run(
     'INSERT INTO recuperaciones (id, cuenta_id, token_hash, creado, expira) VALUES (?,?,?,?,?)',
     [uid(), c.id, hashToken(token), ahora(), new Date(Date.now() + 60 * 60000).toISOString()]);
-  const base = process.env.URL_APP || ('https://' + (req.headers.host || 'smarttrainner'));
+  // Acá lo pide el admin logueado, así que si falta URL_APP se usa el host de su propio pedido.
+  const base = URL_APP || (req.protocol + '://' + req.get('host'));
   res.json({ link: base + '/?recuperar=' + token });
 }));
 
@@ -1377,6 +1503,10 @@ app.post('/api/cambiar-clave', auth, ruta(async (req, res) => {
   const { actual, nueva } = req.body || {};
   if (String(nueva || '').length < 8)
     return res.status(400).json({ error: 'La contraseña nueva tiene que tener al menos 8 caracteres.' });
+  if (String(nueva).length > CLAVE_MAX)
+    return res.status(400).json({ error: `La contraseña puede tener hasta ${CLAVE_MAX} caracteres.` });
+  if (!limitar('cambio:' + req.cuentaId, 10, 15))
+    return res.status(429).json({ error: 'Muchos intentos. Esperá unos minutos.' });
   const c = (await data.q('SELECT * FROM cuentas WHERE id = ?', [req.cuentaId]))[0];
   if (!c || !bcrypt.compareSync(actual || '', c.password))
     return res.status(401).json({ error: 'La contraseña actual no coincide.' });
@@ -1384,7 +1514,7 @@ app.post('/api/cambiar-clave', auth, ruta(async (req, res) => {
   await data.run('UPDATE cuentas SET password = ?, sesiones_desde = ?, sesion_version = ? WHERE id = ?',
     [bcrypt.hashSync(nueva, 12), ahora(), version, req.cuentaId]);
   res.json({ ok: true,
-             token: jwt.sign({ cuentaId: req.cuentaId, v: version }, SECRET, { expiresIn: '30d' }) });
+             token: firmar({ cuentaId: req.cuentaId, v: version }) });
 }));
 
 /* ------------------------------------------------------------------
@@ -1654,11 +1784,20 @@ app.delete('/api/items/:id', auth, ruta(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// El alumno pagó otro mes: se renueva el plan sin tocar la rutina.
+app.post('/api/clientes/:id/renovar-plan', auth, ruta(async (req, res) => {
+  const r = await data.renovarPlan(req.cuentaId, req.params.id);
+  if (!r) return res.status(404).json({ error: 'No encontramos ese alumno.' });
+  res.json(r);
+}));
+
 app.post('/api/rutinas/:id/duplicar', auth, ruta(async (req, res) => {
-  const { cliente_id, nombre, con_pesos } = req.body || {};
+  const { cliente_id, nombre, con_pesos, renovar } = req.body || {};
   const r = await data.duplicarRutina(req.cuentaId, req.params.id, cliente_id,
     { nombre, conPesos: !!con_pesos });
   if (!r) return res.status(404).json({ error: 'No pudimos copiar: revisá la rutina y el alumno.' });
+  // Renovar = rutina nueva + mes nuevo del plan (si ya está en la semana de vencimiento).
+  if (renovar) r.plan = await data.renovarPlan(req.cuentaId, cliente_id);
   res.json(r);
 }));
 
@@ -2099,9 +2238,30 @@ app.patch('/api/admin/mensajes/:id', auth, soloAdmin, ruta(async (req, res) => {
 /* ------------------------------------------------------------------
    VISTA DEL ALUMNO (sin contraseña, con código en la URL)
 ------------------------------------------------------------------- */
+// Busca al alumno por su link. Los links inválidos se cuentan por IP: probar
+// códigos al azar hasta dar con uno queda frenado enseguida.
+async function alumnoDelLink(req, res) {
+  if (!limitar('linkmal:' + req.ip, 30, 15, true))
+    { res.status(429).json({ error: 'Demasiados intentos. Esperá unos minutos.' }); return null; }
+  const t = String(req.params.token || '');
+  const c = /^[a-f0-9]{10,32}$/.test(t) ? await data.clientePorToken(t) : null;
+  if (!c) {
+    limitar('linkmal:' + req.ip, 30, 15);
+    res.status(404).json({ error: 'Este link no es válido. Pedile uno nuevo a tu profe.' });
+    return null;
+  }
+  return c;
+}
+
+// Cuánto le falta al plan. Lo usa el alumno para ver el aviso de pago.
+const estadoDelPlan = c => {
+  if (!c.vence || !esFecha(c.vence)) return { vence: null, dias_para_vencer: null };
+  return { vence: c.vence, dias_para_vencer: diasEntre(hoy(), c.vence) };
+};
+
 app.get('/api/alumno/:token', ruta(async (req, res) => {
-  const c = await data.clientePorToken(req.params.token);
-  if (!c) return res.status(404).json({ error: 'Este link no es válido. Pedile uno nuevo a tu profe.' });
+  const c = await alumnoDelLink(req, res);
+  if (!c) return;
   const rutinas = await data.rutinasDe(c.cuenta_id, c.id);
   const enCurso = semanaDe(c.inicio);
   // Puede mirar semanas pasadas y las que vienen; por defecto cae en la que está entrenando.
@@ -2114,12 +2274,14 @@ app.get('/api/alumno/:token', ruta(async (req, res) => {
     inicio: c.inicio,
     semana,
     semana_en_curso: enCurso,
-    // Hasta dónde puede mirar hacia adelante: el plan dura cuatro semanas.
-    semanas_totales: Math.max(4, enCurso),
+    // Hasta dónde puede mirar hacia adelante: las semanas que tiene el ciclo actual.
+    semanas_totales: Math.max(
+      c.vence && esFecha(c.vence) && c.inicio ? Math.ceil(diasEntre(c.inicio, c.vence) / 7) : 4, enCurso),
+    ...estadoDelPlan(c),
     rutina: rutinas[0] ? await data.rutinaCompleta(c.cuenta_id, rutinas[0].id) : null,
     // La planilla arranca limpia cada semana, pero lo anterior queda en el historial.
-    series: await data.seriesDeLaSemana(c.cuenta_id, c.id, semana),
-    observaciones: await data.observacionesDeLaSemana(c.cuenta_id, c.id, semana),
+    series: await data.seriesDeLaSemana(c.cuenta_id, c.id, semana, c.inicio),
+    observaciones: await data.observacionesDeLaSemana(c.cuenta_id, c.id, semana, c.inicio),
     indicacion: indicacion || null,
     peso_hoy: (seguimiento.find(x => x.fecha === hoy()) || {}).peso || null,
     seguimiento
@@ -2127,8 +2289,8 @@ app.get('/api/alumno/:token', ruta(async (req, res) => {
 }));
 
 app.post('/api/alumno/:token/series', ruta(async (req, res) => {
-  const c = await data.clientePorToken(req.params.token);
-  if (!c) return res.status(404).json({ error: 'Este link no es válido.' });
+  const c = await alumnoDelLink(req, res);
+  if (!c) return;
   if (!limitar('serie:' + req.params.token, 300, 60))
     return res.status(429).json({ error: 'Anotaste muchísimas series seguidas. Esperá un momento.' });
   const { item_id, ejercicio_id, numero, kg, reps } = req.body || {};
@@ -2142,19 +2304,19 @@ app.post('/api/alumno/:token/series', ruta(async (req, res) => {
     return res.status(400).json({ error: 'Ese número de serie no es válido.' });
   const r = await data.registrarSerie(c, { item_id, ejercicio_id, numero: nOk, kg: pesoOk, reps: repsOk });
   if (!r) return res.status(404).json({ error: 'No encontramos ese ejercicio en tu rutina.' });
-  res.json({ series: await data.seriesDeLaSemana(c.cuenta_id, c.id, semanaDe(c.inicio)) });
+  res.json({ series: await data.seriesDeLaSemana(c.cuenta_id, c.id, semanaDe(c.inicio), c.inicio) });
 }));
 
 app.delete('/api/alumno/:token/series/:id', ruta(async (req, res) => {
-  const c = await data.clientePorToken(req.params.token);
-  if (!c) return res.status(404).json({ error: 'Este link no es válido.' });
+  const c = await alumnoDelLink(req, res);
+  if (!c) return;
   await data.borrarSerie(c.cuenta_id, c.id, req.params.id);
-  res.json({ series: await data.seriesDeLaSemana(c.cuenta_id, c.id, semanaDe(c.inicio)) });
+  res.json({ series: await data.seriesDeLaSemana(c.cuenta_id, c.id, semanaDe(c.inicio), c.inicio) });
 }));
 
 app.post('/api/alumno/:token/observacion', ruta(async (req, res) => {
-  const c = await data.clientePorToken(req.params.token);
-  if (!c) return res.status(404).json({ error: 'Este link no es válido.' });
+  const c = await alumnoDelLink(req, res);
+  if (!c) return;
   if (!limitar('obs:' + req.params.token, 120, 60))
     return res.status(429).json({ error: 'Guardaste muchas observaciones seguidas. Esperá un momento.' });
   const { item_id, ejercicio_id, texto } = req.body || {};
@@ -2164,20 +2326,20 @@ app.post('/api/alumno/:token/observacion', ruta(async (req, res) => {
     return res.status(400).json({ error: 'La observación es muy larga. Contala en menos palabras.' });
   const r = await data.guardarObservacion(c, { item_id, ejercicio_id, texto });
   if (!r) return res.status(404).json({ error: 'No encontramos ese ejercicio en tu rutina.' });
-  res.json({ observaciones: await data.observacionesDeLaSemana(c.cuenta_id, c.id, semanaDe(c.inicio)) });
+  res.json({ observaciones: await data.observacionesDeLaSemana(c.cuenta_id, c.id, semanaDe(c.inicio), c.inicio) });
 }));
 
 app.post('/api/alumno/:token/indicacion-leida', ruta(async (req, res) => {
-  const c = await data.clientePorToken(req.params.token);
-  if (!c) return res.status(404).json({ error: 'Este link no es válido.' });
+  const c = await alumnoDelLink(req, res);
+  if (!c) return;
   if (!await data.marcarLeida(c, (req.body || {}).id))
     return res.status(404).json({ error: 'No encontramos esa indicación.' });
   res.json({ ok: true });
 }));
 
 app.post('/api/alumno/:token/seguimiento', ruta(async (req, res) => {
-  const c = await data.clientePorToken(req.params.token);
-  if (!c) return res.status(404).json({ error: 'Este link no es válido.' });
+  const c = await alumnoDelLink(req, res);
+  if (!c) return;
   if (!limitar('seg:' + req.params.token, 60, 60))
     return res.status(429).json({ error: 'Guardaste el seguimiento muchas veces seguidas. Esperá un momento.' });
   const { peso, nota } = req.body || {};

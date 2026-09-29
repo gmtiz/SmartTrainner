@@ -94,7 +94,7 @@ check('otra cuenta no ve estos ejercicios', (await call('/ejercicios', { token: 
 console.log('\n== ALUMNOS ==');
 const cl1 = await call('/clientes', { method: 'POST', token: pt1, body: { nombre: 'Juan Perez', contacto: '11-5555', inicio: '2026-08-10' } });
 check('crear alumno', cl1.status === 200);
-check('el link del alumno es corto', cl1.data.token.length === 10, cl1.data.token);
+check('el link del alumno tiene 16 caracteres (64 bits)', cl1.data.token.length === 16, cl1.data.token);
 const cl2 = await call('/clientes', { method: 'POST', token: pt1, body: { nombre: 'Ana Lopez', inicio: '2026-09-01' } });
 check('editar datos del alumno', (await call('/clientes/' + cl1.data.id, { method: 'PATCH', token: pt1, body: { nombre: 'Juan Pérez', contacto: '11-6666', inicio: '2026-08-15' } })).status === 200);
 check('quedo editado', (await call('/clientes/' + cl1.data.id, { token: pt1 })).data.contacto === '11-6666');
@@ -609,7 +609,7 @@ console.log('\n== NOMBRE DE LA APLICACION ==');
   check('el Excel exportado se llama smarttrainner-...', /'smarttrainner-'/.test(html));
   check('el asunto del mail dice SmartTrainner', /contraseña de SmartTrainner/.test(srv));
   check('el remitente del mail dice SmartTrainner', /'SmartTrainner <.*>'/.test(srv));
-  check('el host de respaldo del mail se renombro', /\|\| 'smarttrainner'\)/.test(srv));
+  check('el link del mail nunca se arma con el Host del pedido', !/headers\.host/.test(srv) && /URL_APP \+ '\/\?recuperar='/.test(srv));
   check('el aviso de arranque dice SmartTrainner', /SmartTrainner escuchando/.test(srv));
 
   // Migracion: renombrar no puede desloguear ni perder el tema elegido.
