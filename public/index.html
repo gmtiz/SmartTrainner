@@ -582,10 +582,15 @@
 <body>
 <div id="root"></div>
 
-<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<!-- Versiones fijas con huella (integrity): si alguien altera el archivo en el CDN, el navegador no lo ejecuta. -->
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"
+  integrity="sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"
+  integrity="sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"
+  integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.9/babel.min.js"
+  integrity="sha384-oLbIC13I/8DNBviftYPfOFQS5DC2WUmwk0SyIPmnzu1Ui+vYyATSSBJiJ5ETa4o/" crossorigin="anonymous"></script>
 
 <script type="text/babel">
 const { useState, useEffect, useCallback, useMemo, useRef, createContext, useContext } = React;
@@ -621,16 +626,21 @@ const DIAS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', '
 const fmt = d => d ? d.split('-').reverse().slice(0, 2).join('/') : '—';
 const fmtLargo = d => { if (!d) return '—'; const [a, m, dd] = d.split('-'); return `${dd}/${m}`; };
 const hora = iso => iso ? new Date(iso).toTimeString().slice(0, 5) : '';
-const hoyISO = () => new Date().toISOString().slice(0, 10);
+// Fecha local (no UTC): si no, después de las 21 h en Argentina ya era "mañana".
+const hoyISO = () => { const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
 const semanaDe = i => i ? Math.max(1, Math.floor((Date.now() - new Date(i + 'T00:00:00')) / (7 * 864e5)) + 1) : 1;
-function finPlan(inicio) {
-  if (!inicio) return null;
-  const d = new Date(inicio + 'T00:00:00'); d.setDate(d.getDate() + 28);
-  return d.toISOString().slice(0, 10);
-}
-const diasRestantes = inicio => {
-  const f = finPlan(inicio); if (!f) return null;
-  return Math.ceil((new Date(f + 'T00:00:00') - new Date().setHours(0, 0, 0, 0)) / 864e5);
+/* El plan vence el mismo día del mes siguiente. La fecha la calcula el servidor
+   (campo "vence"); acá solo se cuentan los días. */
+const aUTC = f => { const [a, m, d] = String(f).split('-').map(Number); return Date.UTC(a, m - 1, d); };
+const diasEntre = (desde, hasta) => Math.round((aUTC(hasta) - aUTC(desde)) / 864e5);
+const finPlan = c => (c && c.vence) || null;
+const diasRestantes = c => finPlan(c) ? diasEntre(hoyISO(), c.vence) : null;
+// En qué semana del ciclo actual va el alumno (la 1 es la del arranque).
+const semanaCiclo = c => {
+  if (!c || !c.inicio || !c.vence) return 1;
+  const total = Math.max(1, Math.ceil(diasEntre(c.inicio, c.vence) / 7));
+  return Math.min(total, Math.max(1, Math.floor(diasEntre(c.inicio, hoyISO()) / 7) + 1));
 };
 
 /* Iniciales para el círculo del alumno: "Camila Godoy" -> "CG". */
@@ -638,25 +648,28 @@ const iniciales = n => ((n || '').trim().split(/\s+/).slice(0, 2)
   .map(p => p.charAt(0)).join('').toUpperCase()) || '?';
 
 /* En qué anda el plan del alumno, para la etiqueta de su tarjeta. */
-function estadoPlan(inicio) {
-  const d = diasRestantes(inicio);
+function estadoPlan(c) {
+  const d = diasRestantes(c);
   if (d === null) return { texto: 'Sin plan', clase: '' };
   if (d < 0) return { texto: 'Toca renovar', clase: 'alerta' };
-  if (d === 0) return { texto: 'Termina hoy', clase: 'aviso' };
+  if (d === 0) return { texto: 'Vence hoy', clase: 'aviso' };
   if (d <= 7) return { texto: 'Quedan ' + d + (d === 1 ? ' día' : ' días'), clase: 'aviso' };
-  return { texto: 'Semana ' + Math.min(4, Math.max(1, Math.ceil((29 - d) / 7))), clase: 'ok' };
+  if (c.inicio > hoyISO()) return { texto: 'Arranca el ' + fmtLargo(c.inicio), clase: 'ok' };
+  return { texto: 'Semana ' + semanaCiclo(c), clase: 'ok' };
 }
 
-/* La cinta del plan: cuatro semanas, con una marca por semana. */
-function Progreso({ inicio, compacto }) {
-  if (!inicio) return null;
-  const dias = diasRestantes(inicio);
-  const transcurridos = Math.min(28, Math.max(0, 28 - Math.max(dias, 0)));
-  const pct = (transcurridos / 28) * 100;
+/* La cinta del plan: del arranque al vencimiento, con una marca por semana. */
+function Progreso({ cliente, compacto }) {
+  if (!cliente || !cliente.inicio || !cliente.vence) return null;
+  const dias = diasRestantes(cliente);
+  const total = Math.max(1, diasEntre(cliente.inicio, cliente.vence));
+  const transcurridos = Math.min(total, Math.max(0, total - Math.max(dias, 0)));
+  const pct = (transcurridos / total) * 100;
   const estado = dias < 0 ? 'cumplido' : dias <= 7 ? 'cerca' : '';
-  const semana = Math.min(4, Math.max(1, Math.ceil((transcurridos + 1) / 7)));
-  const marcas = [7, 14, 21].map(d =>
-    <i key={d} className="marca" style={{ left: (d / 28) * 100 + '%' }} />);
+  const marcas = [7, 14, 21, 28].filter(d => d < total).map(d =>
+    <i key={d} className="marca" style={{ left: (d / total) * 100 + '%' }} />);
+  const titulo = dias < 0 ? 'Plan vencido' : dias === 0 ? 'Vence hoy'
+    : dias <= 7 ? 'Quedan ' + dias + (dias === 1 ? ' día' : ' días') : 'Semana ' + semanaCiclo(cliente);
 
   return (
     <div className="plan">
@@ -665,8 +678,9 @@ function Progreso({ inicio, compacto }) {
         {marcas}
       </div>
       <div className="pie">
-        <b>{dias < 0 ? 'Plan cumplido' : 'Semana ' + semana + ' de 4'}</b>
-        {!compacto && <span>{dias < 0 ? 'toca renovar' : 'termina el ' + fmtLargo(finPlan(inicio))}</span>}
+        <b>{titulo}</b>
+        {!compacto && <span>{dias < 0 ? 'venció el ' + fmtLargo(cliente.vence) + ' · toca renovar'
+          : 'vence el ' + fmtLargo(cliente.vence)}</span>}
       </div>
     </div>);
 }
@@ -1103,6 +1117,7 @@ function FormAlumno({ inicial, onGuardar, cerrar, conTurnos }) {
       <label>Nombre<input autoFocus value={f.nombre || ''} onChange={set('nombre')} /></label>
       <label>Teléfono o mail<input value={f.contacto || ''} onChange={set('contacto')} placeholder="Opcional" /></label>
       <label>¿Cuándo arrancó el plan?<input type="date" value={f.inicio || ''} onChange={set('inicio')} /></label>
+      <p className="chico" style={{ marginTop: -4 }}>El plan vence el mismo día del mes siguiente.</p>
       <div className="dos">
         <label>Peso inicial (kg)<input type="number" inputMode="decimal" value={f.peso_inicial || ''}
           onChange={set('peso_inicial')} placeholder="Opcional" /></label>
@@ -1153,7 +1168,7 @@ function Alumnos({ clientes, recargar, abrir, recargarTurnos, irAAyuda }) {
     }
   }
 
-  const porRenovar = clientes.filter(c => { const d = diasRestantes(c.inicio); return d !== null && d <= 7; });
+  const porRenovar = clientes.filter(c => { const d = diasRestantes(c); return d !== null && d <= 7; });
   const visibles = busq.trim()
     ? clientes.filter(c => c.nombre.toLowerCase().includes(busq.trim().toLowerCase()))
     : clientes;
@@ -1167,8 +1182,8 @@ function Alumnos({ clientes, recargar, abrir, recargarTurnos, irAAyuda }) {
           : 'Se terminan ' + porRenovar.length + ' planes'}</h3>
         <p className="suave">
           {porRenovar.map(c => {
-            const d = diasRestantes(c.inicio);
-            const cuando = d < 0 ? 'ya se cumplió' : d === 0 ? 'termina hoy' : 'termina el ' + fmtLargo(finPlan(c.inicio));
+            const d = diasRestantes(c);
+            const cuando = d < 0 ? 'venció el ' + fmtLargo(c.vence) : d === 0 ? 'vence hoy' : 'vence el ' + fmtLargo(c.vence);
             return porRenovar.length === 1 ? cuando.charAt(0).toUpperCase() + cuando.slice(1) : c.nombre + ', ' + cuando;
           }).join('. ')}
         </p>
@@ -1194,7 +1209,7 @@ function Alumnos({ clientes, recargar, abrir, recargarTurnos, irAAyuda }) {
 
     <div className="columnas">
       {visibles.map(c => {
-        const est = estadoPlan(c.inicio);
+        const est = estadoPlan(c);
         return (
           <div className="card tap" key={c.id} onClick={() => abrir(c.id)}>
             <div className="alumno-cab">
@@ -1202,7 +1217,7 @@ function Alumnos({ clientes, recargar, abrir, recargarTurnos, irAAyuda }) {
               <div className="quien"><h3>{c.nombre}</h3></div>
               <span className={'globo ' + est.clase}>{est.texto}</span>
             </div>
-            <Progreso inicio={c.inicio} />
+            <Progreso cliente={c} />
           </div>);
       })}
     </div>
@@ -1471,16 +1486,28 @@ function Ficha({ id, volver, abrirRutina, abrirProgreso, clientes, plantillas, r
     } catch (e) { avisar(e.message, 'mal'); }
   }
 
+  // Pagó otro mes y sigue con la misma rutina: solo se renueva el plan.
+  async function renovarPlan() {
+    try {
+      const r = await api('/clientes/' + id + '/renovar-plan', { method: 'POST' });
+      avisar(r.renovado ? 'Plan renovado hasta el ' + fmtLargo(r.vence)
+        : 'Todavía no está en la semana de vencimiento (vence el ' + fmtLargo(r.vence) + ')');
+      cargar();
+    } catch (e) { avisar(e.message, 'mal'); }
+  }
+
   // Renovar: misma rutina para el mismo alumno, arrastrando lo que ya levantó.
   async function hacerRenovacion(conPesos) {
     try {
       const r = await api('/rutinas/' + renovar.id + '/duplicar', { method: 'POST', body: {
-        cliente_id: id, con_pesos: conPesos,
+        cliente_id: id, con_pesos: conPesos, renovar: true,
         nombre: 'Mes ' + (c.rutinas.length + 1) } });
       setRenovar(null);
-      avisar(conPesos && r.pesos_copiados
-        ? `Rutina nueva con los pesos de ${r.pesos_copiados} ejercicios`
-        : 'Rutina nueva creada');
+      const rutinaTxt = conPesos && r.pesos_copiados
+        ? `Rutina nueva con los pesos de ${r.pesos_copiados} ejercicios` : 'Rutina nueva creada';
+      avisar(r.plan && r.plan.renovado
+        ? rutinaTxt + '. Plan renovado hasta el ' + fmtLargo(r.plan.vence)
+        : rutinaTxt + (r.plan && r.plan.vence ? '. El plan sigue venciendo el ' + fmtLargo(r.plan.vence) : ''));
       abrirRutina(r.id);
     } catch (e) { avisar(e.message, 'mal'); }
   }
@@ -1578,7 +1605,10 @@ function Ficha({ id, volver, abrirRutina, abrirProgreso, clientes, plantillas, r
     </div>
     <p className="suave">{c.contacto || 'Sin contacto cargado'}</p>
     {c.notas && <p className="suave" style={{ marginTop: 6, fontStyle: 'italic' }}>{c.notas}</p>}
-    <div style={{ marginTop: 12 }}><Progreso inicio={c.inicio} /></div>
+    <div style={{ marginTop: 12 }}><Progreso cliente={c} /></div>
+    {diasRestantes(c) !== null && diasRestantes(c) <= 7 &&
+      <button className="btn chico" style={{ marginTop: 10 }} onClick={renovarPlan}>
+        Registrar pago y renovar el plan</button>}
 
     <div className="tablero" style={{ marginTop: 16 }}>
       <div className="dato-grande">
@@ -1790,6 +1820,9 @@ function Ficha({ id, volver, abrirRutina, abrirProgreso, clientes, plantillas, r
         cerrar={() => setRenovar(null)}>
         <p className="suave" style={{ marginBottom: 16 }}>
           Si traés los pesos, cada ejercicio arranca con lo más pesado que logró, y el alumno lo ve como referencia.
+          {diasRestantes(c) === null ? ' También se le arma un plan de un mes desde hoy.'
+            : diasRestantes(c) <= 7 ? ' También se renueva el plan por un mes más.'
+            : ' El plan no cambia: sigue venciendo el ' + fmtLargo(c.vence) + '.'}
         </p>
         <button className="btn" onClick={() => hacerRenovacion(true)}>Renovar con sus pesos</button>
         <button className="btn linea" style={{ marginTop: 10 }} onClick={() => hacerRenovacion(false)}>
@@ -2012,7 +2045,7 @@ function ResumenMes({ cliente, cerrar }) {
         <button className="btn linea" style={{ marginTop: 8 }} onClick={cerrar}>Volver</button>
       </div>
       <h1>{cliente.nombre}</h1>
-      <p className="sub-impresa">Resumen del plan, del {fmt(cliente.inicio)} al {fmtLargo(finPlan(cliente.inicio))}</p>
+      <p className="sub-impresa">Resumen del plan, del {fmt(cliente.inicio)} al {fmtLargo(finPlan(cliente))}</p>
 
       <div className="dia-impreso">
         <h2>Cómo le fue</h2>
@@ -3382,6 +3415,20 @@ function VistaAlumno({ token }) {
       <div className="derecha"><BotonTema /></div></div></div>
     <div className="wrap angosto">
       <h2>Hola, {(d.nombre || '').split(' ')[0]}</h2>
+
+      {d.dias_para_vencer !== null && d.dias_para_vencer !== undefined && d.dias_para_vencer <= 3 &&
+        <div className="recordatorio" role="alert">
+          <h3>{d.dias_para_vencer < 0 ? 'Tu plan está vencido'
+            : d.dias_para_vencer === 0 ? 'Tu plan vence hoy' : 'Tu plan está por vencer'}</h3>
+          <p className="suave">
+            {d.dias_para_vencer < 0
+              ? 'Venció el ' + fmtLargo(d.vence) + '. Abonale a tu profe para renovarlo.'
+              : d.dias_para_vencer === 0
+                ? 'Recordá abonarle a tu profe para seguir entrenando sin cortes.'
+                : 'Vence el ' + fmtLargo(d.vence) + ' (en ' + d.dias_para_vencer +
+                  (d.dias_para_vencer === 1 ? ' día' : ' días') + '). Recordá abonarle a tu profe para seguir sin cortes.'}
+          </p>
+        </div>}
 
       {d.indicacion &&
         <div className="indicacion">
