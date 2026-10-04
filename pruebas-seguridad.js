@@ -118,6 +118,57 @@ const linkRut = await call('/importar', { method: 'POST', token: TT, body: {
   rutinas: [{ alumno: 'Tomás Transacción', rutina: 'Mes 1', dia: 'Día 1', ejercicio: 'Con link roto', video: 'javascript:x', series: '3', reps: '10' }] } });
 check('un link roto en la hoja Rutinas ya no tira abajo la importación', linkRut.status === 200 && linkRut.data.rutinas === 1, JSON.stringify(linkRut.data));
 
+console.log('\n== RUTINAS SIN ALUMNO VAN A PLANTILLAS ==');
+const pla = await nuevaCuenta('pla', 'activo');
+const TP = pla.data.token, pid = await idDe(`pla${s}@x.com`);
+const filasPl = [
+  { alumno: '', rutina: 'Plan A', dia: 'Día 1', ejercicio: 'Ej plantilla 1', grupo: 'Pecho', video: 'https://youtu.be/abc', series: 3, reps: '8-10', nota: 'Bajá lento' },
+  { alumno: '', rutina: 'Plan A', dia: 'Día 1', ejercicio: 'Ej plantilla 2', series: '3', reps: '12' },
+  { alumno: '', rutina: 'Plan A', dia: 'Día 2', ejercicio: 'Ej plantilla 1', series: '4', reps: '6' },
+  { alumno: '', rutina: 'Plan B', dia: 'Día 1', ejercicio: 'Ej plantilla 2', series: '3', reps: '10' }];
+const revPl = await call('/importar/revisar', { method: 'POST', token: TP, body: { rutinas: filasPl } });
+check('la vista previa cuenta las plantillas y sus ejercicios nuevos',
+  revPl.data.nuevos.plantillas === 2 && revPl.data.nuevos.ejercicios === 2 && revPl.data.entra, JSON.stringify(revPl.data));
+const impPl = await call('/importar', { method: 'POST', token: TP, body: { rutinas: filasPl } });
+check('sin alumno se arman plantillas, no rutinas', impPl.status === 200 && impPl.data.plantillas === 2 && impPl.data.rutinas === 0, JSON.stringify(impPl.data));
+const listaPl = (await call('/plantillas', { token: TP })).data;
+const planA = (await call('/plantillas/' + listaPl.find(p => p.nombre === 'Plan A').id, { token: TP })).data;
+check('la plantilla respeta días, orden, series, reps y nota',
+  planA.dias.length === 2 && planA.dias[0].items.length === 2 && planA.dias[0].items[0].series === '3' &&
+  planA.dias[0].items[0].reps === '8-10' && planA.dias[0].items[0].nota === 'Bajá lento', JSON.stringify(planA.dias));
+check('el ejercicio nuevo queda en el banco con grupo y video',
+  (await db.execute({ sql: "SELECT grupo, video_url FROM ejercicios WHERE cuenta_id = ? AND nombre = 'Ej plantilla 1'", args: [pid] })).rows[0].video_url === 'https://youtu.be/abc');
+const otraVez = await call('/importar', { method: 'POST', token: TP, body: { rutinas: filasPl } });
+check('subir el mismo archivo no duplica plantillas', otraVez.status === 200 && otraVez.data.plantillas === 0 &&
+  await contar('plantillas', pid) === 2 && otraVez.data.avisos.some(a => /no la duplicamos/.test(a)), JSON.stringify(otraVez.data));
+check('ni ejercicios', await contar('ejercicios', pid, "AND nombre LIKE 'Ej plantilla%'") === 2);
+for (let i = 0; i < 23; i++)
+  await db.execute({ sql: 'INSERT INTO plantillas (id, cuenta_id, nombre, creada) VALUES (?,?,?,?)', args: ['pl' + s + i, pid, 'Relleno ' + i, '2026-01-01'] });
+const plDeMas = await call('/importar', { method: 'POST', token: TP, body: { rutinas: [{ rutina: 'Plan C', ejercicio: 'Ej plantilla 1' }] } });
+check('las plantillas respetan el tope del plan', plDeMas.status === 402 && plDeMas.data.tope === 'plantillas' &&
+  /1 plantillas nuevas y te quedan 0 lugares/.test(plDeMas.data.error), JSON.stringify(plDeMas.data));
+
+console.log('\n== VACIAR EL BANCO DE EJERCICIOS ==');
+const vac = await nuevaCuenta('vac', 'activo');
+const TV = vac.data.token, vid = await idDe(`vac${s}@x.com`);
+await call('/importar', { method: 'POST', token: TV, body: {
+  ejercicios: [{ ejercicio: 'Suelto 1', grupo: 'Hombros' }, { ejercicio: 'Suelto 2', grupo: 'Hombros' }],
+  alumnos: [{ alumno: 'Vera Vacía' }],
+  rutinas: [{ alumno: 'Vera Vacía', rutina: 'Mes 1', ejercicio: 'En rutina', grupo: 'Pecho' },
+            { rutina: 'Plantilla V', ejercicio: 'En plantilla', grupo: 'Espalda' }] } });
+const ejOtra = await contar('ejercicios', pid);
+const sinXst = await call('/ejercicios', { method: 'DELETE', cookie: cookieDe(vac) });
+check('con cookie y sin X-ST no se puede vaciar', sinXst.status !== 200 && await contar('ejercicios', vid) > 0, String(sinXst.status));
+const v1 = await call('/ejercicios', { method: 'DELETE', token: TV });
+check('vaciar borra lo que no se usa y conserva lo que está en rutinas o plantillas',
+  v1.status === 200 && v1.data.conservados === 2 && await contar('ejercicios', vid) === 2, JSON.stringify(v1.data));
+check('los grupos que quedaron vacíos se van', (await call('/grupos', { token: TV })).data.map(g => g.nombre).sort().join() === 'Espalda,Pecho');
+check('la rutina y la plantilla siguen enteras', await contar('rutina_items', vid) === 1 && await contar('plantilla_items', vid) === 1);
+const v2 = await call('/ejercicios?forzar=1', { method: 'DELETE', token: TV });
+check('forzando, el banco queda vacío', v2.data.ejercicios === 2 && await contar('ejercicios', vid) === 0 && await contar('grupos', vid) === 0, JSON.stringify(v2.data));
+check('y se sacan de rutinas y plantillas', await contar('rutina_items', vid) === 0 && await contar('plantilla_items', vid) === 0);
+check('no toca el banco de otra cuenta', await contar('ejercicios', pid) === ejOtra);
+
 console.log('\n== SESION EN COOKIE ==');
 const ses = await nuevaCuenta('ses');
 const sc = ses.headers.get('set-cookie') || '';

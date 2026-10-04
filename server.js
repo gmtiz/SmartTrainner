@@ -462,6 +462,8 @@ const conexion = () => txActual.getStore() || db;
 // Clave para comparar nombres igual que la base: lower(trim()) de SQLite
 // (solo quita espacios y solo pasa a minúscula letras sin tilde).
 const claveNombre = t => String(t == null ? '' : t).replace(/^ +| +$/g, '').replace(/[A-Z]/g, c => c.toLowerCase());
+// Nombre de rutina de una fila importada (el mismo agrupa rutinas y plantillas).
+const nombreDeRutina = f => String(f.rutina || 'Rutina importada').trim().slice(0, 200) || 'Rutina importada';
 
 const data = {
   async q(sql, args = []) { return (await conexion().execute({ sql, args })).rows; },
@@ -590,6 +592,36 @@ const data = {
     }
     await data.run('DELETE FROM ejercicios WHERE id = ? AND cuenta_id = ?', [id, cuentaId]);
     return { ok: true, usos };
+  },
+
+  // Borra todo el banco y los grupos que quedan vacíos. Los ejercicios usados en
+  // rutinas o plantillas solo se van con forzar (y se van también de ahí).
+  async vaciarBanco(cuentaId, forzar) {
+    const usados = new Set((await data.q(
+      `SELECT e.id FROM ejercicios e
+        WHERE e.cuenta_id = ?
+          AND (EXISTS (SELECT 1 FROM rutina_items i WHERE i.ejercicio_id = e.id AND i.cuenta_id = e.cuenta_id)
+            OR EXISTS (SELECT 1 FROM plantilla_items p WHERE p.ejercicio_id = e.id AND p.cuenta_id = e.cuenta_id))`,
+      [cuentaId])).map(r => r.id));
+    const todos = await data.q('SELECT id FROM ejercicios WHERE cuenta_id = ?', [cuentaId]);
+    let borrados = 0;
+    for (const e of todos) {
+      if (usados.has(e.id) && !forzar) continue;
+      await data.run('DELETE FROM rutina_items WHERE ejercicio_id = ? AND cuenta_id = ?', [e.id, cuentaId]);
+      await data.run('DELETE FROM plantilla_items WHERE ejercicio_id = ? AND cuenta_id = ?', [e.id, cuentaId]);
+      await data.run('DELETE FROM series_log WHERE ejercicio_id = ? AND cuenta_id = ?', [e.id, cuentaId]);
+      await data.run('DELETE FROM ejercicios WHERE id = ? AND cuenta_id = ?', [e.id, cuentaId]);
+      borrados++;
+    }
+    let grupos = 0;
+    for (const g of await data.q('SELECT id, nombre FROM grupos WHERE cuenta_id = ?', [cuentaId])) {
+      const quedan = Number((await data.q(
+        'SELECT COUNT(*) AS n FROM ejercicios WHERE cuenta_id = ? AND grupo = ?', [cuentaId, g.nombre]))[0].n);
+      if (quedan) continue;
+      await data.run('DELETE FROM grupos WHERE id = ? AND cuenta_id = ?', [g.id, cuentaId]);
+      grupos++;
+    }
+    return { ok: true, ejercicios: borrados, grupos, conservados: forzar ? 0 : usados.size };
   },
 
   /* --- clientes --- */
@@ -825,6 +857,20 @@ const data = {
     return rutina;
   },
 
+  // El ejercicio de una fila importada: el del banco si ya está, o uno nuevo con su grupo y video.
+  async ejercicioDeFila(cuentaId, f, avisos) {
+    const nombreEj = String(f.ejercicio || '').trim();
+    const ya = await data.ejercicioPorNombre(cuentaId, nombreEj);
+    if (ya) return { ej: ya, creado: false };
+    let ej = await data.crearEjercicio(cuentaId, { nombre: nombreEj, grupo: f.grupo, video_url: f.video });
+    // Un link de video roto no puede tirar abajo la importación: se crea sin video.
+    if (ej.linkInvalido) {
+      ej = await data.crearEjercicio(cuentaId, { nombre: nombreEj, grupo: f.grupo });
+      avisos.push(`El link de "${nombreEj}" no es válido y quedó sin cargar.`);
+    }
+    return { ej, creado: true };
+  },
+
   async importarRutina(cuentaId, clienteId, { nombre, filas }) {
     if (!await data.cliente(cuentaId, clienteId)) return null;
     const rutinaId = uid();
@@ -843,19 +889,9 @@ const data = {
           [diaId, cuentaId, rutinaId, dias.size, nombreDia, f.dia_sugerido || null]);
         dias.set(nombreDia, diaId);
       }
-      const nombreEj = String(f.ejercicio || '').trim();
-      if (!nombreEj) continue;
-      let ej = await data.ejercicioPorNombre(cuentaId, nombreEj);
-      if (ej) reusados++;
-      else {
-        ej = await data.crearEjercicio(cuentaId, { nombre: nombreEj, grupo: f.grupo, video_url: f.video });
-        // Un link de video roto no puede tirar abajo la importación: se crea sin video.
-        if (ej.linkInvalido) {
-          ej = await data.crearEjercicio(cuentaId, { nombre: nombreEj, grupo: f.grupo });
-          avisos.push(`El link de "${nombreEj}" no es válido y quedó sin cargar.`);
-        }
-        creados++;
-      }
+      if (!String(f.ejercicio || '').trim()) continue;
+      const { ej, creado } = await data.ejercicioDeFila(cuentaId, f, avisos);
+      if (creado) creados++; else reusados++;
       await data.run(
         `INSERT INTO rutina_items (id, cuenta_id, dia_id, ejercicio_id, orden, series, reps, nota)
          VALUES (?,?,?,?,?,?,?,?)`,
@@ -867,6 +903,39 @@ const data = {
              resumen: { dias: dias.size, ejercicios: items, creados, reusados }, avisos };
   },
 
+  // Una rutina del Excel sin alumno se guarda como plantilla, para asignarla después.
+  async importarPlantilla(cuentaId, { nombre, filas }) {
+    const plantillaId = uid();
+    await data.run('INSERT INTO plantillas (id, cuenta_id, nombre, creada) VALUES (?,?,?,?)',
+      [plantillaId, cuentaId, nombre, hoy()]);
+    const dias = new Map();
+    const avisos = [];
+    let items = 0;
+    for (const f of filas) {
+      const nombreDia = String(f.dia || 'Día 1').trim();
+      if (!dias.has(nombreDia)) {
+        const diaId = uid();
+        await data.run(
+          'INSERT INTO plantilla_dias (id, cuenta_id, plantilla_id, orden, nombre, dia_sugerido) VALUES (?,?,?,?,?,?)',
+          [diaId, cuentaId, plantillaId, dias.size, nombreDia, f.dia_sugerido || null]);
+        dias.set(nombreDia, diaId);
+      }
+      if (!String(f.ejercicio || '').trim()) continue;
+      const { ej } = await data.ejercicioDeFila(cuentaId, f, avisos);
+      await data.run(
+        `INSERT INTO plantilla_items (id, cuenta_id, dia_id, ejercicio_id, orden, series, reps, nota)
+         VALUES (?,?,?,?,?,?,?,?)`,
+        [uid(), cuentaId, dias.get(nombreDia), ej.id, items++,
+         f.series != null && f.series !== '' ? String(f.series) : null,
+         f.reps != null && f.reps !== '' ? String(f.reps) : null, f.nota || null]);
+    }
+    return { items, avisos };
+  },
+
+  plantillaPorNombre: async (cuentaId, nombre) =>
+    (await data.q('SELECT id FROM plantillas WHERE cuenta_id = ? AND lower(trim(nombre)) = lower(trim(?))',
+      [cuentaId, String(nombre || '')]))[0],
+
   clientePorNombre: async (cuentaId, nombre) =>
     (await data.q(
       'SELECT * FROM clientes WHERE cuenta_id = ? AND lower(trim(nombre)) = lower(trim(?)) AND activo = 1',
@@ -875,13 +944,16 @@ const data = {
   /* Qué agregaría realmente una importación, sin escribir nada.
      Sigue las mismas reglas que importarTodo: lo que ya existe (o se repite en el
      archivo) no cuenta como nuevo, y los ejercicios que solo aparecen en la hoja
-     Rutinas también se crean, así que también cuentan. */
+     Rutinas también se crean, así que también cuentan. Las rutinas sin alumno son
+     plantillas: cuentan las de nombre nuevo (una con nombre repetido se saltea). */
   async previaImportacion(cuentaId, { alumnos = [], ejercicios = [], rutinas = [], filasRutina = null }) {
     const ejExist = new Set((await data.q('SELECT nombre FROM ejercicios WHERE cuenta_id = ?', [cuentaId]))
       .map(r => claveNombre(r.nombre)));
     const alExist = new Set((await data.q('SELECT nombre FROM clientes WHERE cuenta_id = ? AND activo = 1', [cuentaId]))
       .map(r => claveNombre(r.nombre)));
-    const nuevosAl = new Set(), nuevosEj = new Set();
+    const plExist = new Set((await data.q('SELECT nombre FROM plantillas WHERE cuenta_id = ?', [cuentaId]))
+      .map(r => claveNombre(r.nombre)));
+    const nuevosAl = new Set(), nuevosEj = new Set(), nuevasPl = new Set();
     for (const a of alumnos) {
       const k = claveNombre(String(a.alumno || a.nombre || '').trim());
       if (k && !alExist.has(k)) nuevosAl.add(k);
@@ -889,19 +961,25 @@ const data = {
     const sumarEj = nombre => { const k = claveNombre(String(nombre || '').trim()); if (k && !ejExist.has(k)) nuevosEj.add(k); };
     for (const e of ejercicios) sumarEj(e.ejercicio || e.nombre);
     for (const f of rutinas) {
+      if (!String(f.ejercicio || '').trim()) continue;
       const al = claveNombre(String(f.alumno || '').trim());
+      if (!al) {
+        const pl = claveNombre(nombreDeRutina(f));
+        if (!plExist.has(pl)) { nuevasPl.add(pl); sumarEj(f.ejercicio); }
+        continue;
+      }
       // la rutina solo se arma si el alumno existe o viene en el archivo
-      if (al && String(f.ejercicio || '').trim() && (alExist.has(al) || nuevosAl.has(al))) sumarEj(f.ejercicio);
+      if (alExist.has(al) || nuevosAl.has(al)) sumarEj(f.ejercicio);
     }
     for (const f of (filasRutina || [])) sumarEj(f.ejercicio);
-    return { alumnos: nuevosAl.size, ejercicios: nuevosEj.size };
+    return { alumnos: nuevosAl.size, ejercicios: nuevosEj.size, plantillas: nuevasPl.size };
   },
 
   // Carga inicial completa desde un Excel: alumnos, ejercicios, rutinas y agenda.
   // Todo se hace "sin pisar": lo que ya existe se reutiliza, no se duplica.
   async importarTodo(cuentaId, { alumnos = [], ejercicios = [], rutinas = [], turnos = [] }) {
     const res = { alumnos: 0, alumnosExistentes: 0, ejercicios: 0, ejerciciosExistentes: 0,
-                  grupos: 0, rutinas: 0, items: 0, turnos: 0, avisos: [] };
+                  grupos: 0, rutinas: 0, plantillas: 0, items: 0, turnos: 0, avisos: [] };
 
     // 1) ejercicios y sus grupos
     for (const e of ejercicios) {
@@ -946,15 +1024,30 @@ const data = {
       res.alumnos++;
     }
 
-    // 3) rutinas: se agrupan por alumno + nombre de rutina + día
-    const porRutina = new Map();
+    // 3) rutinas: se agrupan por alumno + nombre de rutina + día.
+    //    Sin alumno, la rutina queda como plantilla para asignarla después.
+    const porRutina = new Map(), porPlantilla = new Map();
     for (const f of rutinas) {
       const alumno = String(f.alumno || '').trim();
       const ejercicio = String(f.ejercicio || '').trim();
-      if (!alumno || !ejercicio) continue;
-      const clave = alumno + '||' + String(f.rutina || 'Rutina importada').trim();
+      if (!ejercicio) continue;
+      if (!alumno) {
+        const nombre = nombreDeRutina(f);
+        if (!porPlantilla.has(nombre)) porPlantilla.set(nombre, []);
+        porPlantilla.get(nombre).push(f);
+        continue;
+      }
+      const clave = alumno + '||' + nombreDeRutina(f);
       if (!porRutina.has(clave)) porRutina.set(clave, []);
       porRutina.get(clave).push(f);
+    }
+    for (const [nombre, filas] of porPlantilla) {
+      if (await data.plantillaPorNombre(cuentaId, nombre)) {
+        res.avisos.push(`Ya tenías una plantilla "${nombre}": no la duplicamos.`);
+        continue;
+      }
+      const r = await data.importarPlantilla(cuentaId, { nombre, filas });
+      res.plantillas++; res.items += r.items; res.avisos.push(...r.avisos);
     }
     for (const [clave, filas] of porRutina) {
       const [alumno, nombreRutina] = clave.split('||');
@@ -1801,6 +1894,12 @@ app.patch('/api/ejercicios/:id', auth, ruta(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// Vaciar el banco entero, para arrancar limpio antes de importar uno nuevo.
+// Sin forzar, se quedan los que están en rutinas o plantillas (y avisa cuántos).
+app.delete('/api/ejercicios', auth, ruta(async (req, res) => {
+  res.json(await data.enTransaccion(() => data.vaciarBanco(req.cuentaId, req.query.forzar === '1')));
+}));
+
 app.delete('/api/ejercicios/:id', auth, ruta(async (req, res) => {
   const r = await data.borrarEjercicio(req.cuentaId, req.params.id, req.query.forzar === '1');
   if (r.bloqueado) return res.status(409).json({
@@ -1972,14 +2071,18 @@ const lista = v => Array.isArray(v) ? v : [];
 
 async function controlImportacion(cuenta, nuevos) {
   const lim = limites(cuenta.plan), uso = await usoDe(cuenta.id);
+  nuevos = Object.assign({ plantillas: 0 }, nuevos);
   const libres = { alumnos: Math.max(0, lim.alumnos - uso.alumnos),
-                   ejercicios: Math.max(0, lim.ejercicios - uso.ejercicios) };
+                   ejercicios: Math.max(0, lim.ejercicios - uso.ejercicios),
+                   plantillas: Math.max(0, lim.plantillas - uso.plantillas) };
   const lugares = n => n === 1 ? 'te queda 1 lugar' : `te quedan ${n} lugares`;
   const faltan = [];
   if (nuevos.alumnos > libres.alumnos)
     faltan.push(`${nuevos.alumnos} alumnos nuevos y ${lugares(libres.alumnos)}`);
   if (nuevos.ejercicios > libres.ejercicios)
     faltan.push(`${nuevos.ejercicios} ejercicios nuevos y ${lugares(libres.ejercicios)}`);
+  if (nuevos.plantillas > libres.plantillas)
+    faltan.push(`${nuevos.plantillas} plantillas nuevas y ${lugares(libres.plantillas)}`);
   const mensaje = faltan.length
     ? `No entra en tu plan: el archivo trae ${faltan.join(', y ')}. No se cargó nada. ` +
       (cuenta.plan === 'prueba' ? 'Pasá al plan completo para sumar más.'
@@ -2026,8 +2129,8 @@ app.post('/api/importar', auth, ruta(async (req, res) => {
   const control = await controlImportacion(req.cuenta,
     await data.previaImportacion(req.cuentaId, { alumnos, ejercicios, rutinas }));
   if (!control.entra)
-    return res.status(402).json({ error: control.mensaje, tope: control.nuevos.alumnos > control.libres.alumnos
-      ? 'alumnos' : 'ejercicios', control });
+    return res.status(402).json({ error: control.mensaje,
+      tope: ['alumnos', 'ejercicios', 'plantillas'].find(k => control.nuevos[k] > control.libres[k]), control });
   res.json(await data.enTransaccion(() => data.importarTodo(req.cuentaId, { alumnos, ejercicios, rutinas, turnos })));
 }));
 

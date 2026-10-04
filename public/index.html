@@ -1066,6 +1066,27 @@ function Ejercicios({ ejercicios, grupos, ejemplos, recargar, irAAyuda }) {
     } catch (e) { avisar(e.message, 'mal'); }
   }
 
+  // Deja el banco limpio (ejercicios y grupos), por ejemplo antes de importar uno nuevo.
+  async function vaciar() {
+    if (!await confirmar('¿Vaciamos todo tu banco de ejercicios?',
+      `Se borran los ${ejercicios.length} ejercicios y los grupos musculares. Los que estén en alguna rutina o plantilla te los preguntamos aparte.`,
+      'Sí, vaciarlo')) return;
+    try {
+      const r = await api('/ejercicios', { method: 'DELETE' });
+      await recargar();
+      if (!r.conservados) { avisar(`Listo, borramos ${r.ejercicios} ejercicios. El banco quedó vacío.`); return; }
+      if (!await confirmar(`Quedan ${r.conservados} que estás usando`,
+        'Están en rutinas o plantillas. Si los borrás también, desaparecen de esas rutinas y plantillas, junto con lo que anotaron los alumnos en esos ejercicios.',
+        'Borrarlos también')) {
+        avisar(`Borramos ${r.ejercicios}. Dejamos ${r.conservados} que estás usando.`);
+        return;
+      }
+      const r2 = await api('/ejercicios?forzar=1', { method: 'DELETE' });
+      await recargar();
+      avisar(`Listo, borramos ${r.ejercicios + r2.ejercicios} ejercicios. El banco quedó vacío.`);
+    } catch (e) { avisar(e.message, 'mal'); }
+  }
+
   async function borrar(ej) {
     if (!await confirmar('¿Sacamos este ejercicio del banco?',
       `"${ej.nombre}" ya no va a aparecer cuando armes rutinas nuevas.`, 'Sí, sacarlo')) return;
@@ -1107,6 +1128,8 @@ function Ejercicios({ ejercicios, grupos, ejemplos, recargar, irAAyuda }) {
     <div className="barra-sup">
       <button className="btn linea chico" onClick={() => setVerGrupos(true)}>
         Grupos musculares ({grupos.length})</button>
+      {!!ejercicios.length &&
+        <button className="btn riesgo chico" onClick={vaciar}>Vaciar el banco</button>}
       {ejercicios.length > 8 &&
         <input className="buscador" value={busq} onChange={e => setBusq(e.target.value)}
           placeholder="Buscar ejercicio" />}
@@ -1219,7 +1242,7 @@ function FormAlumno({ inicial, onGuardar, cerrar, conTurnos }) {
     </Modal>);
 }
 
-function Alumnos({ clientes, recargar, abrir, recargarTurnos, irAAyuda }) {
+function Alumnos({ clientes, recargar, abrir, recargarTurnos, alImportar, irAAyuda }) {
   const [form, setForm] = useState(null);
   const [importar, setImportar] = useState(false);
   const [tope, setTope] = useState(null);
@@ -1294,7 +1317,7 @@ function Alumnos({ clientes, recargar, abrir, recargarTurnos, irAAyuda }) {
 
     {form && <FormAlumno inicial={form} conTurnos onGuardar={crear} cerrar={() => setForm(null)} />}
     {importar && <ImportarTodo cerrar={() => setImportar(false)} irAAyuda={irAAyuda}
-      alTerminar={async () => { await recargar(); await recargarTurnos(); }} />}
+      alTerminar={async () => { await recargar(); await recargarTurnos(); if (alImportar) await alImportar(); }} />}
     {tope && <Tope texto={tope} cerrar={() => setTope(null)} irAAyuda={irAAyuda} />}
   </div>);
 }
@@ -1384,7 +1407,7 @@ function ImportarTodo({ cerrar, alTerminar, irAAyuda }) {
             ejercicio: r['ejercicio'] || '', grupo: r['grupo'] || '',
             series: r['series'] || '', reps: r['reps'] || r['repeticiones'] || '',
             nota: r['nota'] || '', video: r['video'] || ''
-          })).filter(r => String(r.alumno).trim() && String(r.ejercicio).trim()),
+          })).filter(r => String(r.ejercicio).trim()),   // sin alumno, la rutina va a Plantillas
 
           turnos: hoja(['agenda', 'turnos', 'horarios']).map(t => ({
             alumno: t['alumno'] || '', dia_semana: numDia(t['dia'] || t['día'] || t['dia semana']),
@@ -1425,6 +1448,10 @@ function ImportarTodo({ cerrar, alTerminar, irAAyuda }) {
 
   if (tope) return <Tope texto={tope} cerrar={cerrar} irAAyuda={irAAyuda} />;
 
+  // Cada nombre de rutina distinto entre las filas sin alumno es una plantilla.
+  const sinAlumno = datos
+    ? [...new Set(datos.rutinas.filter(r => !String(r.alumno).trim()).map(r => String(r.rutina).trim()))] : [];
+
   if (resultado) return (
     <Modal titulo="Listo, importamos todo" cerrar={() => { cerrar(); alTerminar && alTerminar(); }}>
       <p className="suave" style={{ marginBottom: 12 }}>Esto es lo que quedó cargado:</p>
@@ -1434,7 +1461,9 @@ function ImportarTodo({ cerrar, alTerminar, irAAyuda }) {
           <tr><td>Alumnos que ya tenías</td><td>{resultado.alumnosExistentes}</td></tr>
           <tr><td>Ejercicios nuevos</td><td><b>{resultado.ejercicios}</b></td></tr>
           <tr><td>Ejercicios reutilizados</td><td>{resultado.ejerciciosExistentes}</td></tr>
-          <tr><td>Rutinas armadas</td><td><b>{resultado.rutinas}</b> ({resultado.items} ejercicios)</td></tr>
+          <tr><td>Rutinas armadas</td><td><b>{resultado.rutinas}</b></td></tr>
+          <tr><td>Plantillas nuevas</td><td><b>{resultado.plantillas || 0}</b></td></tr>
+          <tr><td>Ejercicios en rutinas y plantillas</td><td>{resultado.items}</td></tr>
           <tr><td>Turnos en la agenda</td><td><b>{resultado.turnos}</b></td></tr>
         </tbody>
       </table>
@@ -1456,6 +1485,8 @@ function ImportarTodo({ cerrar, alTerminar, irAAyuda }) {
         <p className="chico" style={{ marginTop: 10 }}>
           El archivo puede tener hasta cuatro hojas: <b>Alumnos</b>, <b>Ejercicios</b>, <b>Rutinas</b> y <b>Agenda</b>.
           Podés usar solo las que necesites. Nada se pisa: lo que ya existe se reutiliza.
+          Si en la hoja Rutinas dejás vacía la columna <b>alumno</b>, la rutina se guarda como plantilla
+          y después la asignás a quien quieras.
         </p>
         <a className="video" href="/plantilla-carga.xlsx" download style={{ display: 'block', marginTop: 12 }}>
           Bajar la plantilla con las cuatro hojas</a>
@@ -1467,6 +1498,8 @@ function ImportarTodo({ cerrar, alTerminar, irAAyuda }) {
             <tr><td>Alumnos</td><td><b>{datos.alumnos.length}</b></td></tr>
             <tr><td>Ejercicios</td><td><b>{datos.ejercicios.length}</b></td></tr>
             <tr><td>Filas de rutina</td><td><b>{datos.rutinas.length}</b></td></tr>
+            {!!sinAlumno.length &&
+              <tr><td>Rutinas sin alumno (van a Plantillas)</td><td><b>{sinAlumno.length}</b></td></tr>}
             <tr><td>Turnos</td><td><b>{datos.turnos.length}</b></td></tr>
           </tbody>
         </table>
@@ -1478,7 +1511,9 @@ function ImportarTodo({ cerrar, alTerminar, irAAyuda }) {
           : (<div className={control.entra ? 'card' : 'recordatorio'} style={{ marginTop: 12 }}>
               <p className="chico">
                 Nuevos de verdad: <b>{control.nuevos.alumnos}</b> alumnos (te quedan {control.libres.alumnos}) ·{' '}
-                <b>{control.nuevos.ejercicios}</b> ejercicios (te quedan {control.libres.ejercicios}).
+                <b>{control.nuevos.ejercicios}</b> ejercicios (te quedan {control.libres.ejercicios})
+                {!!control.nuevos.plantillas &&
+                  <> · <b>{control.nuevos.plantillas}</b> plantillas (te quedan {control.libres.plantillas})</>}.
                 Lo que ya tenés se reutiliza y no ocupa lugar.</p>
               {!control.entra && <p className="chico" style={{ marginTop: 6 }}><b>{control.mensaje}</b></p>}
             </div>)}
@@ -3846,7 +3881,8 @@ function App() {
       volver={() => { setClienteId(null); recargarClientes(); }} abrirRutina={setRutinaId}
       abrirProgreso={setProgresoId} />;
   else contenido = <Alumnos clientes={clientes} recargar={recargarClientes} abrir={setClienteId}
-    recargarTurnos={recargarTurnos} irAAyuda={() => irA('ayuda')} />;
+    recargarTurnos={recargarTurnos} irAAyuda={() => irA('ayuda')}
+    alImportar={async () => { await recargarEjercicios(); await recargarPlantillas(); }} />;
 
   // En el celular entran cinco accesos abajo. Si la cuenta es admin y hay más,
   // los últimos se agrupan en "Más" para que ninguno quede escondido.
