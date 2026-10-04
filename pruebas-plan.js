@@ -218,11 +218,14 @@ console.log('\n== CABECERAS DE SEGURIDAD ==');
 const pag = await fetch(B.replace('/api', '/'));
 const csp = pag.headers.get('content-security-policy') || '';
 check('manda Content-Security-Policy', /default-src 'self'/.test(csp) && /connect-src 'self'/.test(csp));
-check('los scripts solo pueden venir de unpkg', /script-src 'self' 'unsafe-inline' 'unsafe-eval' https:\/\/unpkg\.com(;|$)/.test(csp));
+check('CSP estricta: sin unsafe-inline ni unsafe-eval en scripts', /script-src 'self' https:\/\/unpkg\.com(;|$)/.test(csp) && !/script-src[^;]*unsafe/.test(csp));
 check('manda HSTS', /max-age=31536000/.test(pag.headers.get('strict-transport-security') || ''));
 check('no permite cámara ni ubicación', /camera=\(\)/.test(pag.headers.get('permissions-policy') || ''));
 check('no dice que es Express', !pag.headers.get('x-powered-by'));
-check('las librerías tienen versión fija y huella', (html.match(/integrity="sha384-/g) || []).length === 4 && !/react@18\//.test(html));
+check('las librerías tienen versión fija y huella', (html.match(/integrity="sha384-/g) || []).length === 3 && !/react@18\//.test(html));
+check('ya no se carga Babel en el navegador', !/babel\/standalone/.test(html));
+const servido = await (await fetch(B.replace('/api', '/'))).text();
+check('la página servida trae la app compilada, no JSX', /<script src="\/app\.[a-f0-9]{12}\.js"><\/script>/.test(servido) && !/text\/babel/.test(servido));
 
 console.log('\n== LINKS DE ALUMNO ADIVINADOS ==');
 const ipAtacante = '10.66.0.1';

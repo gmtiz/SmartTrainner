@@ -8,6 +8,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const { AsyncLocalStorage } = require('async_hooks');
 const { createClient } = require('@libsql/client');
 
 const app = express();
@@ -26,11 +27,11 @@ app.use((req, res, next) => {
   res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
-  // Solo se cargan scripts propios y de las versiones fijas de unpkg; los datos
-  // solo pueden viajar a nuestro propio servidor.
+  // Solo se ejecutan scripts propios y las versiones fijas de unpkg: nada escrito
+  // dentro de la página ni armado con eval. Los datos solo viajan a nuestro servidor.
   res.setHeader('Content-Security-Policy', [
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com",
+    "script-src 'self' https://unpkg.com",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com",
     "img-src 'self' data: blob: https:",
@@ -42,7 +43,48 @@ app.use((req, res, next) => {
   ].join('; '));
   next();
 });
-app.use(express.static('public'));
+/* ------------------------------------------------------------------
+   FRONTEND COMPILADO
+   El código de la app (JSX) se compila una sola vez al arrancar el servidor,
+   en vez de en cada celular. Carga más rápido y permite la política de
+   seguridad estricta (sin 'unsafe-eval' ni scripts sueltos en la página).
+   Si existe public/vendor/xlsx.full.min.js, se usa esa versión de la
+   librería de Excel en lugar de la de unpkg.
+------------------------------------------------------------------- */
+const fs = require('fs');
+const path = require('path');
+const PUBLICO = path.join(__dirname, 'public');
+const XLSX_LOCAL = path.join(PUBLICO, 'vendor', 'xlsx.full.min.js');
+
+function armarFrontend() {
+  let html = fs.readFileSync(path.join(PUBLICO, 'index.html'), 'utf8');
+  const marca = '<script type="text/babel">';
+  const ini = html.indexOf(marca), fin = html.indexOf('</script>', ini);
+  if (ini < 0 || fin < 0) throw new Error('No encontré el código de la app en public/index.html');
+  const { code } = require('@babel/core').transformSync(html.slice(ini + marca.length, fin), {
+    babelrc: false, configFile: false, sourceType: 'script', comments: false,
+    presets: [[require.resolve('@babel/preset-react'), { runtime: 'classic' }]]
+  });
+  const huella = crypto.createHash('sha256').update(code).digest('hex').slice(0, 12);
+  html = html.slice(0, ini) + `<script src="/app.${huella}.js"></script>` + html.slice(fin + '</script>'.length);
+  if (fs.existsSync(XLSX_LOCAL)) {
+    const antes = html;
+    html = html.replace(/<script src="https:\/\/unpkg\.com\/xlsx@[^>]*><\/script>/, '<script src="/vendor/xlsx.full.min.js"></script>');
+    if (html === antes) throw new Error('No encontré la etiqueta de xlsx para reemplazarla por la local');
+  }
+  return { html, js: code, huella };
+}
+const FRONT = armarFrontend();
+console.log('Frontend compilado (' + FRONT.huella + ')' + (fs.existsSync(XLSX_LOCAL) ? ' con xlsx local.' : '.'));
+
+const enviarApp = (req, res) => { res.set('Cache-Control', 'no-cache'); res.type('html').send(FRONT.html); };
+app.get(['/', '/index.html'], enviarApp);
+app.get('/app.:huella.js', (req, res) => {
+  if (req.params.huella !== FRONT.huella) return res.status(404).end();
+  res.set('Cache-Control', 'public, max-age=31536000, immutable');
+  res.type('application/javascript').send(FRONT.js);
+});
+app.use(express.static('public', { index: false }));
 
 const db = createClient({
   url: process.env.TURSO_URL,
@@ -188,7 +230,13 @@ const COLUMNAS = [
   ['grupos', 'ejemplo', 'INTEGER'],
   // Plan mensual: cuándo vence y qué día del mes se cobra.
   ['clientes', 'vence', 'TEXT'],
-  ['clientes', 'dia_cobro', 'INTEGER']
+  ['clientes', 'dia_cobro', 'INTEGER'],
+  // Marca propia del entrenador (plan completo): lo que ve su alumno.
+  ['cuentas', 'marca_nombre', 'TEXT'],
+  ['cuentas', 'marca_color', 'TEXT'],
+  ['cuentas', 'marca_logo', 'TEXT'],        // imagen en base64
+  ['cuentas', 'marca_logo_tipo', 'TEXT'],   // image/png, image/jpeg o image/webp
+  ['cuentas', 'marca_version', 'INTEGER']
 ];
 
 async function prepararBase() {
@@ -235,17 +283,17 @@ const PLANES = {
   prueba: {
     nombre: 'Gratis',
     alumnos: 3, ejercicios: 25, plantillas: 1,
-    importar: false, exportar: false, progreso: false
+    importar: false, exportar: false, progreso: false, marca: false
   },
   activo: {
     nombre: 'Completo',
     alumnos: 150, ejercicios: 600, plantillas: 25,
-    importar: true, exportar: true, progreso: true
+    importar: true, exportar: true, progreso: true, marca: true
   },
   pausado: {
     nombre: 'Pausado',
     alumnos: 0, ejercicios: 0, plantillas: 0,
-    importar: false, exportar: false, progreso: false
+    importar: false, exportar: false, progreso: false, marca: false
   }
 };
 const limites = plan => PLANES[plan] || PLANES.prueba;
@@ -349,12 +397,35 @@ const SECRET = process.env.JWT_SECRET;
 if (!SECRET) { console.error('Falta JWT_SECRET'); process.exit(1); }
 if (SECRET.length < 32)
   console.warn('AVISO: JWT_SECRET es corto. Usá uno de 32 caracteres o más (ej: openssl rand -hex 32).');
-const JWT_OPC = { algorithm: 'HS256', expiresIn: '30d' };
+// Sesión de 7 días que se renueva sola mientras el entrenador usa la app.
+const DIAS_SESION = 7;
+const JWT_OPC = { algorithm: 'HS256', expiresIn: DIAS_SESION + 'd' };
 const firmar = datos => jwt.sign(datos, SECRET, JWT_OPC);
+
+/* La sesión viaja en una cookie que el código de la página NO puede leer (httpOnly):
+   aunque se colara un script malicioso, no podría robarse la sesión.
+   SameSite=Strict + la cabecera X-ST en cada escritura frenan pedidos armados
+   desde otros sitios (CSRF). */
+const COOKIE_SESION = 'st_sesion';
+const opcionesCookie = () => ({ httpOnly: true, secure: true, sameSite: 'strict', path: '/api',
+  maxAge: DIAS_SESION * 864e5 });
+const ponerSesion = (res, datos) => { const t = firmar(datos); res.cookie(COOKIE_SESION, t, opcionesCookie()); return t; };
+const quitarSesion = res => res.clearCookie(COOKIE_SESION, { httpOnly: true, secure: true, sameSite: 'strict', path: '/api' });
+function leerCookie(req, nombre) {
+  for (const parte of String(req.headers.cookie || '').split(';')) {
+    const i = parte.indexOf('=');
+    if (i > 0 && parte.slice(0, i).trim() === nombre) {
+      try { return decodeURIComponent(parte.slice(i + 1).trim()); } catch { return null; }
+    }
+  }
+  return null;
+}
 
 // Link de la app para los mails. Nunca se arma con el Host que manda el navegador:
 // alguien podría pedir la recuperación de otro con un Host falso y quedarse con el link.
 const URL_APP = (process.env.URL_APP || '').replace(/\/+$/, '');
+if (!(process.env.ADMIN_EMAIL || '').trim())
+  console.warn('AVISO: falta ADMIN_EMAIL. Sin eso, la primera cuenta que se registre en una base vacía queda como admin.');
 if (!URL_APP) console.warn('AVISO: falta URL_APP (ej: https://smarttrainner.com). Sin eso no se mandan mails con links.');
 const escaparHtml = t => String(t == null ? '' : t)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -383,13 +454,36 @@ const semanaDe = (inicio, fecha) => {
 // Arranque del ciclo para filtrar lo anotado. Si la fecha es futura o no hay, no filtra.
 const desdeCiclo = inicio => (inicio && esFecha(inicio) && inicio <= hoy()) ? inicio : '0000-01-01';
 
+// Transacción en curso (si la hay). Todo lo que pasa por data.q / data.run dentro de
+// data.enTransaccion() va a la misma transacción: o se guarda todo, o nada.
+const txActual = new AsyncLocalStorage();
+const conexion = () => txActual.getStore() || db;
+
+// Clave para comparar nombres igual que la base: lower(trim()) de SQLite
+// (solo quita espacios y solo pasa a minúscula letras sin tilde).
+const claveNombre = t => String(t == null ? '' : t).replace(/^ +| +$/g, '').replace(/[A-Z]/g, c => c.toLowerCase());
+
 const data = {
-  async q(sql, args = []) { return (await db.execute({ sql, args })).rows; },
-  async run(sql, args = []) { await db.execute({ sql, args }); },
+  async q(sql, args = []) { return (await conexion().execute({ sql, args })).rows; },
+  async run(sql, args = []) { await conexion().execute({ sql, args }); },
+
+  async enTransaccion(fn) {
+    if (txActual.getStore()) return fn();          // ya estamos dentro de una
+    const tx = await db.transaction('write');
+    try {
+      const r = await txActual.run(tx, fn);
+      await tx.commit();
+      return r;
+    } catch (e) {
+      try { await tx.rollback(); } catch { /* la transacción ya estaba cerrada */ }
+      throw e;
+    } finally { tx.close(); }
+  },
 
   cuenta: async id =>
     (await data.q(
-      `SELECT id, email, nombre, rol, plan, creada, sesiones_desde, capacidad, sesion_version
+      `SELECT id, email, nombre, rol, plan, creada, sesiones_desde, capacidad, sesion_version,
+              marca_nombre, marca_color, marca_logo_tipo, marca_version
          FROM cuentas WHERE id = ?`, [id]))[0],
 
   /* --- grupos musculares --- */
@@ -738,6 +832,7 @@ const data = {
       [rutinaId, cuentaId, clienteId, nombre || 'Rutina importada', hoy()]);
 
     const dias = new Map();
+    const avisos = [];
     let creados = 0, reusados = 0, items = 0;
     for (const f of filas) {
       const nombreDia = String(f.dia || 'Día 1').trim();
@@ -752,7 +847,15 @@ const data = {
       if (!nombreEj) continue;
       let ej = await data.ejercicioPorNombre(cuentaId, nombreEj);
       if (ej) reusados++;
-      else { ej = await data.crearEjercicio(cuentaId, { nombre: nombreEj, grupo: f.grupo, video_url: f.video }); creados++; }
+      else {
+        ej = await data.crearEjercicio(cuentaId, { nombre: nombreEj, grupo: f.grupo, video_url: f.video });
+        // Un link de video roto no puede tirar abajo la importación: se crea sin video.
+        if (ej.linkInvalido) {
+          ej = await data.crearEjercicio(cuentaId, { nombre: nombreEj, grupo: f.grupo });
+          avisos.push(`El link de "${nombreEj}" no es válido y quedó sin cargar.`);
+        }
+        creados++;
+      }
       await data.run(
         `INSERT INTO rutina_items (id, cuenta_id, dia_id, ejercicio_id, orden, series, reps, nota)
          VALUES (?,?,?,?,?,?,?,?)`,
@@ -761,13 +864,38 @@ const data = {
          f.reps != null && f.reps !== '' ? String(f.reps) : null, f.nota || null]);
     }
     return { rutina: await data.rutinaCompleta(cuentaId, rutinaId),
-             resumen: { dias: dias.size, ejercicios: items, creados, reusados } };
+             resumen: { dias: dias.size, ejercicios: items, creados, reusados }, avisos };
   },
 
   clientePorNombre: async (cuentaId, nombre) =>
     (await data.q(
       'SELECT * FROM clientes WHERE cuenta_id = ? AND lower(trim(nombre)) = lower(trim(?)) AND activo = 1',
       [cuentaId, String(nombre || '')]))[0],
+
+  /* Qué agregaría realmente una importación, sin escribir nada.
+     Sigue las mismas reglas que importarTodo: lo que ya existe (o se repite en el
+     archivo) no cuenta como nuevo, y los ejercicios que solo aparecen en la hoja
+     Rutinas también se crean, así que también cuentan. */
+  async previaImportacion(cuentaId, { alumnos = [], ejercicios = [], rutinas = [], filasRutina = null }) {
+    const ejExist = new Set((await data.q('SELECT nombre FROM ejercicios WHERE cuenta_id = ?', [cuentaId]))
+      .map(r => claveNombre(r.nombre)));
+    const alExist = new Set((await data.q('SELECT nombre FROM clientes WHERE cuenta_id = ? AND activo = 1', [cuentaId]))
+      .map(r => claveNombre(r.nombre)));
+    const nuevosAl = new Set(), nuevosEj = new Set();
+    for (const a of alumnos) {
+      const k = claveNombre(String(a.alumno || a.nombre || '').trim());
+      if (k && !alExist.has(k)) nuevosAl.add(k);
+    }
+    const sumarEj = nombre => { const k = claveNombre(String(nombre || '').trim()); if (k && !ejExist.has(k)) nuevosEj.add(k); };
+    for (const e of ejercicios) sumarEj(e.ejercicio || e.nombre);
+    for (const f of rutinas) {
+      const al = claveNombre(String(f.alumno || '').trim());
+      // la rutina solo se arma si el alumno existe o viene en el archivo
+      if (al && String(f.ejercicio || '').trim() && (alExist.has(al) || nuevosAl.has(al))) sumarEj(f.ejercicio);
+    }
+    for (const f of (filasRutina || [])) sumarEj(f.ejercicio);
+    return { alumnos: nuevosAl.size, ejercicios: nuevosEj.size };
+  },
 
   // Carga inicial completa desde un Excel: alumnos, ejercicios, rutinas y agenda.
   // Todo se hace "sin pisar": lo que ya existe se reutiliza, no se duplica.
@@ -790,7 +918,11 @@ const data = {
           if (r && r.linkInvalido) res.avisos.push(`El link de "${nombre}" no es válido y quedó sin cargar.`);
         }
       } else {
-        await data.crearEjercicio(cuentaId, { nombre, grupo: e.grupo, video_url: e.video });
+        const r = await data.crearEjercicio(cuentaId, { nombre, grupo: e.grupo, video_url: e.video });
+        if (r.linkInvalido) {
+          await data.crearEjercicio(cuentaId, { nombre, grupo: e.grupo });
+          res.avisos.push(`El link de "${nombre}" no es válido y quedó sin cargar.`);
+        }
         res.ejercicios++;
       }
     }
@@ -801,9 +933,16 @@ const data = {
       if (!nombre) continue;
       const ya = await data.clientePorNombre(cuentaId, nombre);
       if (ya) { res.alumnosExistentes++; continue; }
+      // Un dato raro (peso "ochenta", fecha "ayer") se descarta con aviso, no rompe todo.
+      const peso = a.peso === '' || a.peso == null ? null : numeroEn(a.peso, ...RANGOS.peso);
+      const altura = a.altura === '' || a.altura == null ? null : numeroEn(a.altura, ...RANGOS.altura);
+      if (a.peso !== '' && a.peso != null && peso === null) res.avisos.push(`El peso de "${nombre}" no es válido y quedó vacío.`);
+      if (a.altura !== '' && a.altura != null && altura === null) res.avisos.push(`La altura de "${nombre}" no es válida y quedó vacía.`);
+      const inicio = a.inicio && esFecha(a.inicio) ? a.inicio : hoy();
+      if (a.inicio && !esFecha(a.inicio)) res.avisos.push(`La fecha de "${nombre}" no es válida: arranca hoy.`);
       await data.crearCliente(cuentaId, {
-        nombre, contacto: a.contacto, inicio: a.inicio || hoy(),
-        peso_inicial: a.peso, altura: a.altura, notas: a.notas });
+        nombre, contacto: a.contacto ? String(a.contacto).slice(0, 200) : null, inicio,
+        peso_inicial: peso, altura, notas: a.notas ? String(a.notas).slice(0, 2000) : null });
       res.alumnos++;
     }
 
@@ -822,13 +961,13 @@ const data = {
       const cli = await data.clientePorNombre(cuentaId, alumno);
       if (!cli) { res.avisos.push(`No encontramos al alumno "${alumno}" para su rutina.`); continue; }
       const r = await data.importarRutina(cuentaId, cli.id, { nombre: nombreRutina, filas });
-      res.rutinas++; res.items += r.resumen.ejercicios;
+      res.rutinas++; res.items += r.resumen.ejercicios; res.avisos.push(...r.avisos);
     }
 
     // 4) agenda
     for (const t of turnos) {
       const alumno = String(t.alumno || '').trim();
-      if (!alumno || t.dia_semana == null || !t.hora) continue;
+      if (!alumno || numeroEn(t.dia_semana, 0, 6) === null || !esHora(t.hora)) continue;
       const cli = await data.clientePorNombre(cuentaId, alumno);
       if (!cli) { res.avisos.push(`No encontramos al alumno "${alumno}" para su horario.`); continue; }
       const repetido = (await data.q(
@@ -1334,15 +1473,24 @@ setInterval(() => {
 }, 10 * 60000).unref?.();
 
 // Rutas que una cuenta pausada sigue pudiendo usar: ver su estado y escribirnos.
-const PERMITIDO_PAUSADO = ['/api/perfil', '/api/mensajes', '/api/cambiar-clave'];
+const PERMITIDO_PAUSADO = ['/api/perfil', '/api/mensajes', '/api/cambiar-clave', '/api/sesion'];
 
 async function auth(req, res, next) {
+  try { await autenticar(req, res, next); } catch (e) { next(e); }
+}
+async function autenticar(req, res, next) {
+  // La app usa la cookie; el encabezado Bearer queda para integraciones y pruebas.
   const h = req.headers.authorization || '';
-  const token = h.startsWith('Bearer ') ? h.slice(7) : null;
+  const porCookie = !h.startsWith('Bearer ');
+  const token = porCookie ? leerCookie(req, COOKIE_SESION) : h.slice(7);
   if (!token) return res.status(401).json({ error: 'Falta iniciar sesión.' });
   let datos;
   try { datos = jwt.verify(token, SECRET, { algorithms: ['HS256'] }); }
-  catch { return res.status(401).json({ error: 'La sesión venció. Volvé a entrar.' }); }
+  catch { if (porCookie) quitarSesion(res); return res.status(401).json({ error: 'La sesión venció. Volvé a entrar.' }); }
+
+  // Con cookie, toda escritura tiene que traer X-ST: otro sitio no puede agregarla.
+  if (porCookie && !['GET', 'HEAD', 'OPTIONS'].includes(req.method) && req.get('X-ST') !== '1')
+    return res.status(403).json({ error: 'Pedido rechazado por seguridad. Recargá la página.' });
 
   const cuenta = await data.cuenta(datos.cuentaId);
   if (!cuenta) return res.status(401).json({ error: 'Esta cuenta ya no existe.' });
@@ -1358,10 +1506,22 @@ async function auth(req, res, next) {
     return res.status(403).json({
       error: 'Tu cuenta está pausada. Escribinos desde Ayuda y la reactivamos.', pausado: true });
 
+  // Renovación: si la sesión tiene más de un día, se entrega una nueva de 7 días.
+  if (porCookie && datos.iat && Date.now() / 1000 - datos.iat > 86400)
+    ponerSesion(res, { cuentaId: cuenta.id, v: cuenta.sesion_version || 0 });
+
   req.cuentaId = cuenta.id;
   req.cuenta = cuenta;
   next();
 }
+
+// Pasa a cookie una sesión vieja guardada en el navegador (antes de este cambio).
+app.post('/api/sesion', auth, (req, res) => {
+  ponerSesion(res, { cuentaId: req.cuentaId, v: req.cuenta.sesion_version || 0 });
+  res.json({ ok: true });
+});
+
+app.post('/api/salir', (req, res) => { quitarSesion(res); res.json({ ok: true }); });
 
 app.post('/api/registro', ruta(async (req, res) => {
   const { email, password, nombre } = req.body || {};
@@ -1385,15 +1545,17 @@ app.post('/api/registro', ruta(async (req, res) => {
   if (!limitar('reg:' + req.ip, 12, 60))
     return res.status(429).json({ error: 'Se crearon muchas cuentas desde esta conexión. Probá en un rato.' });
 
-  const total = await data.q('SELECT COUNT(*) AS n FROM cuentas');
-  const esAdmin = Number(total[0].n) === 0 ||
-    (process.env.ADMIN_EMAIL && mail === process.env.ADMIN_EMAIL.trim().toLowerCase());
+  // Con ADMIN_EMAIL configurado, solo ese mail es admin. Sin él (instalación nueva)
+  // la primera cuenta lo es; si alguna vez se vacía la base, nadie más puede quedarse con el admin.
+  const adminMail = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+  const esAdmin = adminMail ? mail === adminMail
+    : Number((await data.q('SELECT COUNT(*) AS n FROM cuentas'))[0].n) === 0;
 
   const id = uid();
   await data.run('INSERT INTO cuentas (id, email, password, nombre, rol, creada) VALUES (?,?,?,?,?,?)',
     [id, mail, bcrypt.hashSync(password, 12), String(nombre).trim(), esAdmin ? 'admin' : 'pt', hoy()]);
   await cargarEjemplos(id);
-  res.json({ token: firmar({ cuentaId: id, v: 0 }),
+  res.json({ token: ponerSesion(res, { cuentaId: id, v: 0 }),
              nombre: String(nombre).trim(), rol: esAdmin ? 'admin' : 'pt' });
 }));
 
@@ -1408,7 +1570,7 @@ app.post('/api/login', ruta(async (req, res) => {
   if (!c || !coincide)
     return res.status(401).json({ error: 'Mail o contraseña incorrectos.' });
   limpiarLimite(clave);
-  res.json({ token: firmar({ cuentaId: c.id, v: c.sesion_version || 0 }),
+  res.json({ token: ponerSesion(res, { cuentaId: c.id, v: c.sesion_version || 0 }),
              nombre: c.nombre, rol: c.rol });
 }));
 
@@ -1514,7 +1676,7 @@ app.post('/api/cambiar-clave', auth, ruta(async (req, res) => {
   await data.run('UPDATE cuentas SET password = ?, sesiones_desde = ?, sesion_version = ? WHERE id = ?',
     [bcrypt.hashSync(nueva, 12), ahora(), version, req.cuentaId]);
   res.json({ ok: true,
-             token: firmar({ cuentaId: req.cuentaId, v: version }) });
+             token: ponerSesion(res, { cuentaId: req.cuentaId, v: version }) });
 }));
 
 /* ------------------------------------------------------------------
@@ -1801,13 +1963,53 @@ app.post('/api/rutinas/:id/duplicar', auth, ruta(async (req, res) => {
   res.json(r);
 }));
 
+/* ------------------------------------------------------------------
+   IMPORTAR DESDE EXCEL
+   Antes de escribir se calcula cuánto agrega de verdad el archivo. Si no entra
+   en el plan, no se carga nada (todo o nada: no quedan rutinas a medias).
+------------------------------------------------------------------- */
+const lista = v => Array.isArray(v) ? v : [];
+
+async function controlImportacion(cuenta, nuevos) {
+  const lim = limites(cuenta.plan), uso = await usoDe(cuenta.id);
+  const libres = { alumnos: Math.max(0, lim.alumnos - uso.alumnos),
+                   ejercicios: Math.max(0, lim.ejercicios - uso.ejercicios) };
+  const lugares = n => n === 1 ? 'te queda 1 lugar' : `te quedan ${n} lugares`;
+  const faltan = [];
+  if (nuevos.alumnos > libres.alumnos)
+    faltan.push(`${nuevos.alumnos} alumnos nuevos y ${lugares(libres.alumnos)}`);
+  if (nuevos.ejercicios > libres.ejercicios)
+    faltan.push(`${nuevos.ejercicios} ejercicios nuevos y ${lugares(libres.ejercicios)}`);
+  const mensaje = faltan.length
+    ? `No entra en tu plan: el archivo trae ${faltan.join(', y ')}. No se cargó nada. ` +
+      (cuenta.plan === 'prueba' ? 'Pasá al plan completo para sumar más.'
+        : 'Sacá filas del archivo o escribinos y ampliamos tu plan.')
+    : null;
+  return { nuevos, libres, entra: !faltan.length, mensaje };
+}
+
 app.post('/api/clientes/:id/importar', auth, ruta(async (req, res) => {
   const { nombre, filas } = req.body || {};
   if (!Array.isArray(filas) || !filas.length)
     return res.status(400).json({ error: 'El archivo no trae ninguna fila para importar.' });
-  const r = await data.importarRutina(req.cuentaId, req.params.id, { nombre, filas });
-  if (!r) return res.status(404).json({ error: 'No encontramos ese alumno.' });
+  if (filas.length > 2000)
+    return res.status(400).json({ error: 'El archivo es demasiado grande. Partilo en dos y probá de nuevo.' });
+  if (!await data.cliente(req.cuentaId, req.params.id))
+    return res.status(404).json({ error: 'No encontramos ese alumno.' });
+  const nuevos = await data.previaImportacion(req.cuentaId, { filasRutina: filas });
+  const control = await controlImportacion(req.cuenta, nuevos);
+  if (!control.entra) return res.status(402).json({ error: control.mensaje, tope: 'ejercicios', control });
+  const r = await data.enTransaccion(() => data.importarRutina(req.cuentaId, req.params.id, { nombre, filas }));
   res.json(r);
+}));
+
+// Vista previa: cuánto agrega el archivo y si entra en el plan. No escribe nada.
+app.post('/api/importar/revisar', auth, ruta(async (req, res) => {
+  const b = req.body || {};
+  const nuevos = await data.previaImportacion(req.cuentaId,
+    { alumnos: lista(b.alumnos), ejercicios: lista(b.ejercicios), rutinas: lista(b.rutinas) });
+  res.json(Object.assign({ permitido: !!limites(req.cuenta.plan).importar },
+    await controlImportacion(req.cuenta, nuevos)));
 }));
 
 app.post('/api/importar', auth, ruta(async (req, res) => {
@@ -1815,14 +2017,18 @@ app.post('/api/importar', auth, ruta(async (req, res) => {
     return res.status(402).json({
       error: 'La carga desde Excel es del plan completo. Es lo que te deja pasar tu planilla entera de una vez.',
       tope: 'importar' });
-  const { alumnos, ejercicios, rutinas, turnos } = req.body || {};
-  const total = (alumnos || []).length + (ejercicios || []).length + (rutinas || []).length + (turnos || []).length;
+  const b = req.body || {};
+  const alumnos = lista(b.alumnos), ejercicios = lista(b.ejercicios), rutinas = lista(b.rutinas), turnos = lista(b.turnos);
+  const total = alumnos.length + ejercicios.length + rutinas.length + turnos.length;
   if (!total) return res.status(400).json({ error: 'El archivo no trae datos para importar.' });
   if (total > 5000)
     return res.status(400).json({ error: 'El archivo es demasiado grande. Partilo en dos y probá de nuevo.' });
-  const tope = await topeAlcanzado(req.cuenta, 'alumnos', (alumnos || []).length);
-  if (tope) return res.status(402).json({ error: tope, tope: 'alumnos' });
-  res.json(await data.importarTodo(req.cuentaId, { alumnos, ejercicios, rutinas, turnos }));
+  const control = await controlImportacion(req.cuenta,
+    await data.previaImportacion(req.cuentaId, { alumnos, ejercicios, rutinas }));
+  if (!control.entra)
+    return res.status(402).json({ error: control.mensaje, tope: control.nuevos.alumnos > control.libres.alumnos
+      ? 'alumnos' : 'ejercicios', control });
+  res.json(await data.enTransaccion(() => data.importarTodo(req.cuentaId, { alumnos, ejercicios, rutinas, turnos })));
 }));
 
 /* ------------------------------------------------------------------
@@ -2238,6 +2444,79 @@ app.patch('/api/admin/mensajes/:id', auth, soloAdmin, ruta(async (req, res) => {
 /* ------------------------------------------------------------------
    VISTA DEL ALUMNO (sin contraseña, con código en la URL)
 ------------------------------------------------------------------- */
+/* ------------------------------------------------------------------
+   MARCA PROPIA (plan completo)
+   El entrenador pone su nombre comercial, su color y su logo en lo que ve
+   el alumno. "SmartTrainner" sigue figurando siempre (lo pone la interfaz,
+   no se puede configurar). Si la cuenta deja el plan completo, los datos
+   quedan guardados pero no se muestran.
+------------------------------------------------------------------- */
+const COLOR_OK = /^#[0-9a-fA-F]{6}$/;
+const LOGO_MAX = 200 * 1024;
+// El tipo se decide mirando los primeros bytes, no lo que dice el navegador.
+function tipoDeImagen(buf) {
+  if (buf.length > 8 && buf.slice(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))) return 'image/png';
+  if (buf.length > 3 && buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return 'image/jpeg';
+  if (buf.length > 12 && buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  return null;
+}
+const marcaVisible = cuenta => !!(cuenta && limites(cuenta.plan).marca);
+const datosMarca = cuenta => ({
+  nombre: cuenta.marca_nombre || null,
+  color: cuenta.marca_color || null,
+  logo: !!cuenta.marca_logo_tipo,
+  version: cuenta.marca_version || 0
+});
+function exigirMarca(req, res) {
+  if (marcaVisible(req.cuenta)) return true;
+  res.status(402).json({ error: 'Tu marca (logo, color y nombre) es del plan completo.', tope: 'marca' });
+  return false;
+}
+async function enviarLogo(res, cuentaId) {
+  const f = (await data.q('SELECT marca_logo, marca_logo_tipo, plan FROM cuentas WHERE id = ?', [cuentaId]))[0];
+  if (!f || !f.marca_logo || !limites(f.plan).marca) return res.status(404).json({ error: 'No hay logo.' });
+  res.set({ 'Content-Type': f.marca_logo_tipo, 'Cache-Control': 'private, max-age=86400',
+            'Content-Disposition': 'inline; filename="logo"', 'Content-Security-Policy': "default-src 'none'" });
+  res.send(Buffer.from(f.marca_logo, 'base64'));
+}
+
+app.get('/api/marca', auth, ruta(async (req, res) =>
+  res.json(Object.assign({ permitido: marcaVisible(req.cuenta) }, datosMarca(req.cuenta)))));
+
+app.put('/api/marca', auth, ruta(async (req, res) => {
+  if (!exigirMarca(req, res)) return;
+  const b = req.body || {};
+  // Sin caracteres de control: el nombre se muestra tal cual en el celular del alumno.
+  const nombre = String(b.nombre || '').replace(/[\u0000-\u001F\u007F]/g, '').trim();
+  if (nombre.length > 40) return res.status(400).json({ error: 'El nombre de tu marca puede tener hasta 40 caracteres.' });
+  const color = b.color ? String(b.color).trim() : '';
+  if (color && !COLOR_OK.test(color)) return res.status(400).json({ error: 'El color no es válido.' });
+  await data.run('UPDATE cuentas SET marca_nombre = ?, marca_color = ?, marca_version = COALESCE(marca_version, 0) + 1 WHERE id = ?',
+    [nombre || null, color ? color.toUpperCase() : null, req.cuentaId]);
+  res.json(datosMarca(await data.cuenta(req.cuentaId)));
+}));
+
+app.put('/api/marca/logo', auth, ruta(async (req, res) => {
+  if (!exigirMarca(req, res)) return;
+  const m = String((req.body || {}).imagen || '').match(/^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$/);
+  if (!m) return res.status(400).json({ error: 'El logo tiene que ser una imagen PNG, JPG o WebP.' });
+  const buf = Buffer.from(m[2], 'base64');
+  if (buf.length > LOGO_MAX) return res.status(400).json({ error: 'El logo es muy pesado: tiene que pesar menos de 200 KB.' });
+  const tipo = tipoDeImagen(buf);
+  if (!tipo) return res.status(400).json({ error: 'Ese archivo no es una imagen válida.' });
+  await data.run(`UPDATE cuentas SET marca_logo = ?, marca_logo_tipo = ?, marca_version = COALESCE(marca_version, 0) + 1
+                   WHERE id = ?`, [buf.toString('base64'), tipo, req.cuentaId]);
+  res.json(datosMarca(await data.cuenta(req.cuentaId)));
+}));
+
+app.delete('/api/marca/logo', auth, ruta(async (req, res) => {
+  await data.run(`UPDATE cuentas SET marca_logo = NULL, marca_logo_tipo = NULL,
+                   marca_version = COALESCE(marca_version, 0) + 1 WHERE id = ?`, [req.cuentaId]);
+  res.json(datosMarca(await data.cuenta(req.cuentaId)));
+}));
+
+app.get('/api/marca/logo', auth, ruta(async (req, res) => enviarLogo(res, req.cuentaId)));
+
 // Busca al alumno por su link. Los links inválidos se cuentan por IP: probar
 // códigos al azar hasta dar con uno queda frenado enseguida.
 async function alumnoDelLink(req, res) {
@@ -2278,6 +2557,13 @@ app.get('/api/alumno/:token', ruta(async (req, res) => {
     semanas_totales: Math.max(
       c.vence && esFecha(c.vence) && c.inicio ? Math.ceil(diasEntre(c.inicio, c.vence) / 7) : 4, enCurso),
     ...estadoDelPlan(c),
+    // La marca del profe, si su plan la incluye.
+    marca: await (async () => {
+      const cta = await data.cuenta(c.cuenta_id);
+      // Sin nada configurado, el alumno ve la cabecera normal de SmartTrainner.
+      const tiene = cta && (cta.marca_nombre || cta.marca_color || cta.marca_logo_tipo);
+      return marcaVisible(cta) && tiene ? datosMarca(cta) : null;
+    })(),
     rutina: rutinas[0] ? await data.rutinaCompleta(c.cuenta_id, rutinas[0].id) : null,
     // La planilla arranca limpia cada semana, pero lo anterior queda en el historial.
     series: await data.seriesDeLaSemana(c.cuenta_id, c.id, semana, c.inicio),
@@ -2286,6 +2572,12 @@ app.get('/api/alumno/:token', ruta(async (req, res) => {
     peso_hoy: (seguimiento.find(x => x.fecha === hoy()) || {}).peso || null,
     seguimiento
   });
+}));
+
+app.get('/api/alumno/:token/logo', ruta(async (req, res) => {
+  const c = await alumnoDelLink(req, res);
+  if (!c) return;
+  await enviarLogo(res, c.cuenta_id);
 }));
 
 app.post('/api/alumno/:token/series', ruta(async (req, res) => {
@@ -2361,7 +2653,7 @@ app.post('/api/alumno/:token/seguimiento', ruta(async (req, res) => {
 app.get('/api/salud', (req, res) => res.json({ ok: true }));
 
 // Link corto y prolijo para el alumno: /r/CODIGO
-app.get('/r/:token', (req, res) => res.sendFile('index.html', { root: 'public' }));
+app.get('/r/:token', enviarApp);
 
 app.use((err, req, res, next) => {
   console.error('Error en', req.method, req.path, '->', err.message);
