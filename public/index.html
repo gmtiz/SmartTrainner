@@ -113,6 +113,20 @@
   }
   .brand button:hover{color:var(--acento)}
   .brand .derecha{margin-left:auto;display:flex;align-items:center;gap:14px}
+  /* Marca propia del entrenador */
+  .brand .logo-marca{height:28px;width:auto;max-width:96px;object-fit:contain;border-radius:6px;align-self:center}
+  .con-app{color:var(--nav-gris);font-size:12px}
+  .pie-app{text-align:center;color:var(--gris);font-size:12px;margin:22px 0 8px}
+  .cabeza-marca{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+  .cabeza-marca img{height:40px;width:auto;max-width:140px;object-fit:contain}
+  .cabeza-marca b{font-family:var(--tit),sans-serif;font-size:15px}
+  .vista-marca{border:1px solid var(--borde);border-radius:var(--r);overflow:hidden;margin-top:12px}
+  .vista-marca .barra{display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--nav);border-bottom:1px solid var(--nav-linea)}
+  .vista-marca .barra img{height:26px;width:auto;max-width:90px;object-fit:contain;border-radius:5px}
+  .vista-marca .barra b{font-family:var(--tit),sans-serif;font-weight:800}
+  .vista-marca .cuerpo{padding:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .muestra-color{display:flex;gap:10px;align-items:center}
+  .muestra-color input[type=color]{width:48px;height:38px;padding:2px;margin-top:0}
   .tema{
     background:none;border:0;cursor:pointer;font-size:17px;line-height:1;padding:6px 8px;
     min-height:32px;min-width:32px;color:var(--nav-gris);
@@ -589,8 +603,7 @@
   integrity="sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"
   integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/@babel/standalone@7.29.9/babel.min.js"
-  integrity="sha384-oLbIC13I/8DNBviftYPfOFQS5DC2WUmwk0SyIPmnzu1Ui+vYyATSSBJiJ5ETa4o/" crossorigin="anonymous"></script>
+<!-- El código de la app (abajo) lo compila el servidor al arrancar: ver server.js. -->
 
 <script type="text/babel">
 const { useState, useEffect, useCallback, useMemo, useRef, createContext, useContext } = React;
@@ -606,16 +619,30 @@ if (!sesion) {
   } catch { /* modo privado */ }
 }
 
+/* La sesión vive en una cookie que esta página no puede leer (la maneja el servidor).
+   "sesion" solo guarda, por única vez, el token viejo del navegador para pasarlo a cookie. */
+let sesionActiva = false;   // true cuando ya entramos: un 401 después significa "se venció"
+
+async function pasarSesionACookie() {
+  if (!sesion) return;
+  try {
+    await fetch('/api/sesion', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-ST': '1', Authorization: 'Bearer ' + sesion } });
+  } catch { /* sin conexión: se pedirá entrar de nuevo */ }
+  try { localStorage.removeItem(CLAVE); localStorage.removeItem(CLAVE_VIEJA); } catch { /* modo privado */ }
+  sesion = null;
+}
+
 async function api(path, opts = {}) {
   const r = await fetch('/api' + path, {
     method: opts.method || 'GET',
-    headers: Object.assign({ 'Content-Type': 'application/json' },
-      sesion ? { Authorization: 'Bearer ' + sesion } : {}),
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', 'X-ST': '1' },
     body: opts.body ? JSON.stringify(opts.body) : undefined
   });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) {
-    if (r.status === 401) { sesion = null; localStorage.removeItem(CLAVE); location.reload(); }
+    if (r.status === 401 && sesionActiva) { sesionActiva = false; location.reload(); }
     const e = new Error(d.error || 'Algo no salió bien. Probá de nuevo.');
     e.status = r.status; e.datos = d; throw e;
   }
@@ -646,6 +673,47 @@ const semanaCiclo = c => {
 /* Iniciales para el círculo del alumno: "Camila Godoy" -> "CG". */
 const iniciales = n => ((n || '').trim().split(/\s+/).slice(0, 2)
   .map(p => p.charAt(0)).join('').toUpperCase()) || '?';
+
+/* ---------- marca propia: colores legibles a partir del color del profe ---------- */
+const hexARgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+const rgbAHex = rgb => '#' + rgb.map(v => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0')).join('');
+const mezclar = (a, b, t) => { const x = hexARgb(a), y = hexARgb(b); return rgbAHex(x.map((v, i) => v + (y[i] - v) * t)); };
+const luminancia = h => { const [r, g, b] = hexARgb(h).map(v => v / 255)
+  .map(c => c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+const contraste = (a, b) => { const [x, y] = [luminancia(a), luminancia(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+// Acerca el color al negro (o al blanco) hasta que se lea bien sobre ese fondo.
+const legibleSobre = (color, fondo, hacia) => {
+  let c = color;
+  for (let i = 0; i < 20 && contraste(c, fondo) < 4.5; i++) c = mezclar(c, hacia, 0.12);
+  return c;
+};
+function paletaMarca(color) {
+  if (!/^#[0-9a-fA-F]{6}$/.test(color || '')) return null;
+  const c = color.toUpperCase();
+  const sobre = contraste(c, '#FFFFFF') >= contraste(c, '#1A1410') ? '#FFFFFF' : '#1A1410';
+  return {
+    claro: { acento: c, texto: legibleSobre(c, '#FFFFFF', '#000000'), hover: mezclar(c, '#000000', 0.14),
+             suave: mezclar(c, '#FFFFFF', 0.9), suaveHover: mezclar(c, '#FFFFFF', 0.8), sobre },
+    oscuro: { acento: c, texto: legibleSobre(c, '#1E1915', '#FFFFFF'), hover: mezclar(c, '#FFFFFF', 0.18),
+              suave: mezclar(c, '#1E1915', 0.78), suaveHover: mezclar(c, '#1E1915', 0.65), sobre }
+  };
+}
+// Aplica el color del profe a toda la página mientras el componente está montado.
+function usarColorMarca(color) {
+  useEffect(() => {
+    const p = paletaMarca(color);
+    if (!p) return;
+    const vars = v => `--acento:${v.acento};--acento-texto:${v.texto};--acento-hover:${v.hover};` +
+      `--suave:${v.suave};--suave-hover:${v.suaveHover};--sobre-acento:${v.sobre};`;
+    const st = document.createElement('style');
+    st.textContent = `html[data-marca]:not([data-tema="oscuro"]){${vars(p.claro)}}` +
+                     `html[data-marca][data-tema="oscuro"]{${vars(p.oscuro)}}`;
+    document.head.appendChild(st);
+    document.documentElement.setAttribute('data-marca', '1');
+    return () => { st.remove(); document.documentElement.removeAttribute('data-marca'); };
+  }, [color]);
+}
 
 /* En qué anda el plan del alumno, para la etiqueta de su tarjeta. */
 function estadoPlan(c) {
@@ -846,7 +914,7 @@ function Entrar({ onEntrar }) {
     setCargando(true);
     try {
       const r = await api(modo === 'login' ? '/login' : '/registro', { method: 'POST', body: f });
-      sesion = r.token; localStorage.setItem(CLAVE, r.token);
+      sesionActiva = true;   // la cookie ya la dejó el servidor
       avisar(modo === 'login' ? '¡Hola de nuevo!' : '¡Cuenta creada! Bienvenido.');
       onEntrar(r);
     } catch (e) { avisar(e.message, 'mal'); } finally { setCargando(false); }
@@ -1264,7 +1332,7 @@ function ImportarTodo({ cerrar, alTerminar, irAAyuda }) {
           for (let i = 1; i < filas.length; i++) {
             const f = filas[i] || [];
             const vacia = f.every(v => String(v == null ? '' : v).trim() === '');
-            if (vacia) break;                      // corta en la primera fila en blanco
+            if (vacia) continue;                   // un renglón en blanco en el medio no corta la lista
             const primera = String(f[0] == null ? '' : f[0]).trim();
             if (primera.startsWith('•') || /^cómo completar/i.test(primera)) break;  // notas al pie
             const o = {};
@@ -1331,12 +1399,20 @@ function ImportarTodo({ cerrar, alTerminar, irAAyuda }) {
           return;
         }
         setDatos(d);
+        revisar(d);
       } catch { avisar('No pudimos leer ese archivo. ¿Es un Excel?', 'mal'); }
     };
     lector.readAsArrayBuffer(archivo);
   }
 
   const [tope, setTope] = useState(null);
+  // Lo que el archivo agrega de verdad y si entra en el plan (lo calcula el servidor).
+  const [control, setControl] = useState(null);
+  async function revisar(d) {
+    setControl(null);
+    try { setControl(await api('/importar/revisar', { method: 'POST', body: d })); }
+    catch (e) { avisar(e.message, 'mal'); }
+  }
 
   async function importar() {
     setSubiendo(true);
@@ -1398,9 +1474,19 @@ function ImportarTodo({ cerrar, alTerminar, irAAyuda }) {
           <p className="chico" style={{ marginTop: 10 }}>
             Alumnos: {datos.alumnos.slice(0, 5).map(a => a.alumno).join(', ')}
             {datos.alumnos.length > 5 ? ` y ${datos.alumnos.length - 5} más` : ''}</p>}
-        <button className="btn" style={{ marginTop: 14 }} onClick={importar} disabled={subiendo}>
+        {!control ? <p className="chico" style={{ marginTop: 10 }}>Revisando cuánto entra en tu plan...</p>
+          : (<div className={control.entra ? 'card' : 'recordatorio'} style={{ marginTop: 12 }}>
+              <p className="chico">
+                Nuevos de verdad: <b>{control.nuevos.alumnos}</b> alumnos (te quedan {control.libres.alumnos}) ·{' '}
+                <b>{control.nuevos.ejercicios}</b> ejercicios (te quedan {control.libres.ejercicios}).
+                Lo que ya tenés se reutiliza y no ocupa lugar.</p>
+              {!control.entra && <p className="chico" style={{ marginTop: 6 }}><b>{control.mensaje}</b></p>}
+            </div>)}
+        <button className="btn" style={{ marginTop: 14 }} onClick={importar}
+          disabled={subiendo || !control || !control.entra}>
           {subiendo ? 'Importando...' : 'Importar todo'}</button>
-        <button className="btn linea" style={{ marginTop: 10 }} onClick={() => setDatos(null)}>Elegir otro archivo</button>
+        <button className="btn linea" style={{ marginTop: 10 }} onClick={() => { setDatos(null); setControl(null); }}>
+          Elegir otro archivo</button>
       </div>)}
     </Modal>);
 }
@@ -1464,8 +1550,8 @@ function Ficha({ id, volver, abrirRutina, abrirProgreso, clientes, plantillas, r
   useEffect(() => { cargar(); }, [cargar]);
 
   if (!c) return <p className="suave">Cargando...</p>;
-  if (impresion) return <Impresion rutina={impresion} alumno={c.nombre} cerrar={() => setImpresion(null)} />;
-  if (resumen) return <ResumenMes cliente={c} cerrar={() => setResumen(false)} />;
+  if (impresion) return <Impresion rutina={impresion} alumno={c.nombre} perfil={perfil} cerrar={() => setImpresion(null)} />;
+  if (resumen) return <ResumenMes cliente={c} perfil={perfil} cerrar={() => setResumen(false)} />;
   const link = location.origin + '/r/' + c.token;
 
   async function crearRutina() {
@@ -1869,7 +1955,17 @@ function Ficha({ id, volver, abrirRutina, abrirProgreso, clientes, plantillas, r
 
 /* Vista de impresión: el navegador la manda a papel o la guarda como PDF.
    Es el gancho para los entrenadores que hoy entregan la rutina impresa. */
-function Impresion({ rutina, alumno, cerrar }) {
+/* Cabecera de las hojas impresas: la marca del profe si su plan la incluye. */
+function CabezaMarca({ perfil }) {
+  if (!perfil || !perfil.limites || !perfil.limites.marca) return null;
+  if (!perfil.marca_nombre && !perfil.marca_logo_tipo) return null;
+  return (<div className="cabeza-marca">
+    {perfil.marca_logo_tipo && <img alt="" src={'/api/marca/logo?v=' + (perfil.marca_version || 0)} />}
+    {perfil.marca_nombre && <b>{perfil.marca_nombre}</b>}
+  </div>);
+}
+
+function Impresion({ rutina, alumno, cerrar, perfil }) {
   // Se abre el diálogo de impresión solo, pero la vista queda: si el entrenador
   // cancela sin querer, no pierde la pantalla y puede volver a intentar.
   useEffect(() => {
@@ -1883,6 +1979,7 @@ function Impresion({ rutina, alumno, cerrar }) {
         <button className="btn" onClick={() => window.print()}>Imprimir o guardar en PDF</button>
         <button className="btn linea" style={{ marginTop: 8 }} onClick={cerrar}>Volver</button>
       </div>
+      <CabezaMarca perfil={perfil} />
       <h1>{alumno}</h1>
       <p className="sub-impresa">{rutina.nombre}</p>
       {rutina.dias.map((d, i) => (
@@ -2021,7 +2118,7 @@ function Progresograma({ clienteId, nombre, volver, ejercicios }) {
 
 /* Resumen del mes para imprimir: es lo que el entrenador le muestra al alumno
    cuando llega el momento de renovar. */
-function ResumenMes({ cliente, cerrar }) {
+function ResumenMes({ cliente, cerrar, perfil }) {
   useEffect(() => { const t = setTimeout(() => window.print(), 300); return () => clearTimeout(t); }, []);
 
   const seg = [...(cliente.seguimiento || [])].sort((a, b) => a.fecha.localeCompare(b.fecha));
@@ -2044,6 +2141,7 @@ function ResumenMes({ cliente, cerrar }) {
         <button className="btn" onClick={() => window.print()}>Imprimir o guardar en PDF</button>
         <button className="btn linea" style={{ marginTop: 8 }} onClick={cerrar}>Volver</button>
       </div>
+      <CabezaMarca perfil={perfil} />
       <h1>{cliente.nombre}</h1>
       <p className="sub-impresa">Resumen del plan, del {fmt(cliente.inicio)} al {fmtLargo(finPlan(cliente))}</p>
 
@@ -2847,6 +2945,117 @@ function Pausada({ perfil, salir }) {
     </div>);
 }
 
+/* ---------- tu marca (plan completo) ---------- */
+// Achica el logo en el navegador: pesa menos y, al redibujarlo, se descartan los
+// datos ocultos de la foto (por ejemplo, la ubicación).
+function achicarImagen(archivo, lado = 256) {
+  return new Promise((ok, mal) => {
+    const url = URL.createObjectURL(archivo);
+    const img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, lado / Math.max(img.width, img.height));
+      const cv = document.createElement('canvas');
+      cv.width = Math.max(1, Math.round(img.width * k)); cv.height = Math.max(1, Math.round(img.height * k));
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      URL.revokeObjectURL(url);
+      // PNG conserva la transparencia; si queda pesado se prueba WebP y, último recurso, JPG.
+      let d = cv.toDataURL('image/png');
+      if (d.length > 260000) {
+        const w = cv.toDataURL('image/webp', 0.85);
+        if (w.startsWith('data:image/webp') && w.length < d.length) d = w;
+      }
+      if (d.length > 260000) d = cv.toDataURL('image/jpeg', 0.85);
+      ok(d);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); mal(new Error('No pudimos leer esa imagen.')); };
+    img.src = url;
+  });
+}
+
+function TuMarca({ perfil, recargarPerfil, pedirPlan }) {
+  const permitido = !!(perfil.limites && perfil.limites.marca);
+  const [f, setF] = useState({ nombre: perfil.marca_nombre || '', color: perfil.marca_color || '#E8621F' });
+  const [ocupado, setOcupado] = useState(false);
+  const { avisar, confirmar } = usarAviso();
+
+  if (!permitido) return (
+    <div className="card">
+      <div className="row"><h3>Tu marca</h3><span className="globo">plan completo</span></div>
+      <p className="suave" style={{ marginTop: 6 }}>
+        Poné tu logo, tu color y el nombre de tu marca en la rutina que ve cada alumno y en lo que imprimís.</p>
+      <button className="btn linea chico" style={{ marginTop: 10 }} onClick={pedirPlan}>Quiero pasar al plan completo</button>
+    </div>);
+
+  const colorOk = /^#[0-9a-fA-F]{6}$/.test(f.color);
+  const p = paletaMarca(colorOk ? f.color : '#E8621F');
+  const cambios = f.nombre.trim() !== (perfil.marca_nombre || '') ||
+    (colorOk ? f.color.toUpperCase() : '') !== (perfil.marca_color || '#E8621F').toUpperCase();
+
+  async function guardar() {
+    setOcupado(true);
+    try { await api('/marca', { method: 'PUT', body: { nombre: f.nombre, color: f.color } });
+      await recargarPerfil(); avisar('Guardamos tu marca'); }
+    catch (e) { avisar(e.message, 'mal'); } finally { setOcupado(false); }
+  }
+  async function subirLogo(archivo) {
+    if (!archivo) return;
+    if (!/^image\/(png|jpeg|webp)$/.test(archivo.type)) { avisar('El logo tiene que ser PNG, JPG o WebP', 'mal'); return; }
+    if (archivo.size > 8 * 1024 * 1024) { avisar('Esa imagen es muy pesada. Probá con una de menos de 8 MB.', 'mal'); return; }
+    setOcupado(true);
+    try { const imagen = await achicarImagen(archivo);
+      await api('/marca/logo', { method: 'PUT', body: { imagen } });
+      await recargarPerfil(); avisar('Logo cargado'); }
+    catch (e) { avisar(e.message, 'mal'); } finally { setOcupado(false); }
+  }
+  async function quitarLogo() {
+    if (!await confirmar('¿Sacamos tu logo?', 'Tus alumnos van a ver solo el nombre de tu marca.', 'Sacar logo')) return;
+    try { await api('/marca/logo', { method: 'DELETE' }); await recargarPerfil(); avisar('Logo quitado'); }
+    catch (e) { avisar(e.message, 'mal'); }
+  }
+
+  const logoUrl = perfil.marca_logo_tipo ? '/api/marca/logo?v=' + (perfil.marca_version || 0) : null;
+  return (
+    <div className="card">
+      <div className="row"><h3>Tu marca</h3><span className="globo ok">plan completo</span></div>
+      <p className="suave" style={{ marginTop: 6 }}>
+        Es lo que ve tu alumno en su rutina y lo que sale en lo que imprimís. SmartTrainner aparece siempre, chiquito.</p>
+      <label>Nombre de tu marca
+        <input value={f.nombre} maxLength={40} placeholder={perfil.nombre}
+          onChange={e => setF({ ...f, nombre: e.target.value })} /></label>
+      <label>Tu color
+        <div className="muestra-color">
+          <input type="color" value={colorOk ? f.color : '#E8621F'} onChange={e => setF({ ...f, color: e.target.value })}
+            aria-label="Elegir color" />
+          <input value={f.color} maxLength={7} style={{ marginTop: 0, maxWidth: 120 }}
+            onChange={e => setF({ ...f, color: e.target.value.trim() })} />
+        </div></label>
+      {!colorOk && <p className="chico">Escribí el color como #RRGGBB, por ejemplo #1E88E5.</p>}
+      <label>Logo
+        <input type="file" accept="image/png,image/jpeg,image/webp" disabled={ocupado}
+          onChange={e => { subirLogo(e.target.files[0]); e.target.value = ''; }} /></label>
+      <p className="chico">PNG, JPG o WebP. Lo achicamos solos para que cargue rápido.</p>
+
+      <p className="chico" style={{ marginTop: 12 }}><b>Así lo ve tu alumno</b></p>
+      <div className="vista-marca">
+        <div className="barra">
+          {logoUrl && <img alt="" src={logoUrl} />}
+          <b>{f.nombre.trim() || perfil.nombre}</b>
+          <span className="con-app">con SmartTrainner</span>
+        </div>
+        <div className="cuerpo">
+          <span style={{ background: p.claro.acento, color: p.claro.sobre, padding: '8px 14px',
+            borderRadius: 8, fontWeight: 600 }}>Anotar serie</span>
+          <span style={{ color: p.claro.texto, fontWeight: 600 }}>Semana 2</span>
+        </div>
+      </div>
+
+      <div className="acciones" style={{ marginTop: 14 }}>
+        <button className="btn chico" onClick={guardar} disabled={ocupado || !colorOk || !cambios}>Guardar</button>
+        {logoUrl && <button className="btn riesgo chico" onClick={quitarLogo} disabled={ocupado}>Sacar logo</button>}
+      </div>
+    </div>);
+}
+
 /* ---------- ayuda: plan, uso y consultas ---------- */
 function Ayuda({ perfil, recargarPerfil }) {
   const [mensajes, setMensajes] = useState([]);
@@ -2887,8 +3096,7 @@ function Ayuda({ perfil, recargarPerfil }) {
   async function cambiarClave() {
     try {
       const r = await api('/cambiar-clave', { method: 'POST', body: claves });
-      // El servidor devuelve una sesión nueva: sin esto quedaríamos afuera al instante.
-      if (r.token) { sesion = r.token; localStorage.setItem(CLAVE, r.token); }
+      // El servidor ya dejó la sesión nueva en la cookie; las de otros dispositivos se cerraron.
       setClaves(null); avisar('Contraseña cambiada');
     } catch (e) { avisar(e.message, 'mal'); }
   }
@@ -2940,12 +3148,17 @@ function Ayuda({ perfil, recargarPerfil }) {
           <li><b>Carga desde Excel</b>: pasás tu planilla entera de una vez, con alumnos, rutinas y horarios</li>
           <li><b>25 plantillas</b> de rutina para reutilizar, en vez de una</li>
           <li><b>600 ejercicios</b> en tu banco, en vez de 25</li>
+          <li><b>Tu marca</b>: tu logo, tu color y tu nombre en la rutina de cada alumno</li>
         </ul>
         <button className="btn" onClick={() => { setTipo('pregunta');
           setTexto('Quiero pasar al plan completo.');
           document.getElementById('consulta').scrollIntoView({ behavior: 'smooth' }); }}>
           Quiero pasar al plan completo</button>
       </div>}
+
+    <TuMarca perfil={perfil} recargarPerfil={recargarPerfil} pedirPlan={() => { setTipo('pregunta');
+      setTexto('Quiero pasar al plan completo.');
+      document.getElementById('consulta').scrollIntoView({ behavior: 'smooth' }); }} />
 
     <div className="card">
       <div className="row">
@@ -3340,6 +3553,12 @@ function VistaAlumno({ token }) {
   const { avisar } = usarAviso();
 
   const [semana, setSemana] = useState(null);   // null = la que estoy entrenando
+  // Marca del profe (plan completo): su color en toda la página y su nombre en la pestaña.
+  usarColorMarca(d && d.marca ? d.marca.color : null);
+  useEffect(() => {
+    const n = d && d.marca && d.marca.nombre;
+    document.title = n ? n + ' · SmartTrainner' : 'SmartTrainner';
+  }, [d && d.marca && d.marca.nombre]);
 
   const cargar = useCallback(() => {
     fetch('/api/alumno/' + token + (semana ? '?semana=' + semana : ''))
@@ -3404,6 +3623,7 @@ function VistaAlumno({ token }) {
 
   if (error) return <div className="wrap angosto"><div className="vacio"><p>{error}</p></div></div>;
   if (!d) return <div className="wrap angosto"><p className="suave">Cargando...</p></div>;
+  const marca = d.marca;
 
   const obsDe = item => {
     const o = (d.observaciones || []).find(x => x.item_id === item.id && x.fecha === hoyISO());
@@ -3411,8 +3631,13 @@ function VistaAlumno({ token }) {
   };
 
   return (<div>
-    <div className="topbar"><div className="brand"><h1>SmartTrainner</h1><span className="hola">tu rutina</span>
-      <div className="derecha"><BotonTema /></div></div></div>
+    {marca
+      ? <div className="topbar"><div className="brand">
+          {marca.logo && <img className="logo-marca" alt="" src={'/api/alumno/' + token + '/logo?v=' + marca.version} />}
+          <h1>{marca.nombre || 'Tu rutina'}</h1><span className="con-app">con SmartTrainner</span>
+          <div className="derecha"><BotonTema /></div></div></div>
+      : <div className="topbar"><div className="brand"><h1>SmartTrainner</h1><span className="hola">tu rutina</span>
+          <div className="derecha"><BotonTema /></div></div></div>}
     <div className="wrap angosto">
       <h2>Hola, {(d.nombre || '').split(' ')[0]}</h2>
 
@@ -3495,6 +3720,7 @@ function VistaAlumno({ token }) {
           <p className="suave" key={s.id} style={{ marginTop: 6 }}>
             <b style={{ fontFamily: "'Archivo',sans-serif" }}>{s.peso} kg</b>{' el ' + fmt(s.fecha)}</p>)}
       </div>
+      {marca && <p className="pie-app">Hecho con SmartTrainner</p>}
     </div>
 
     {verIndicacion && d.indicacion &&
@@ -3512,7 +3738,8 @@ function App() {
   const tokenAlumno = ruta ? ruta[1] : params.get('alumno');
   const [tokenRecuperar, setTokenRecuperar] = useState(params.get('recuperar'));
 
-  const [entrado, setEntrado] = useState(!!sesion);
+  // null = todavía no sabemos si hay sesión (se pregunta al servidor al abrir).
+  const [entrado, setEntrado] = useState(null);
   const [perfil, setPerfil] = useState(null);
   const [tab, setTab] = useState('alumnos');
   const [clientes, setClientes] = useState([]);
@@ -3544,16 +3771,32 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (tokenAlumno || tokenRecuperar) return;
+    let vivo = true;
+    (async () => {
+      await pasarSesionACookie();
+      try { const p = await api('/perfil'); if (!vivo) return; sesionActiva = true; setPerfil(p); setEntrado(true); }
+      catch { if (vivo) setEntrado(false); }
+    })();
+    return () => { vivo = false; };
+  }, [tokenAlumno, tokenRecuperar]);
+
+  useEffect(() => {
     if (!entrado || tokenAlumno) return;
     recargarPerfil();
     recargarClientes(); recargarEjercicios(); recargarPlantillas();
   }, [entrado, tokenAlumno, recargarPerfil, recargarClientes, recargarEjercicios, recargarPlantillas]);
 
-  function salir() { localStorage.removeItem(CLAVE); sesion = null; location.href = '/'; }
+  async function salir() {
+    sesionActiva = false;
+    try { await api('/salir', { method: 'POST' }); } catch { /* igual salimos */ }
+    location.href = '/';
+  }
 
   if (tokenAlumno) return <VistaAlumno token={tokenAlumno} />;
   if (tokenRecuperar)
     return <Recuperar token={tokenRecuperar} listo={() => { setTokenRecuperar(null); history.replaceState({}, '', '/'); }} />;
+  if (entrado === null) return <div className="wrap angosto"><p className="suave">Cargando...</p></div>;
   if (!entrado) return <Entrar onEntrar={() => setEntrado(true)} />;
   if (perfil && perfil.plan === 'pausado') return <Pausada perfil={perfil} salir={salir} />;
 
