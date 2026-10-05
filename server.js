@@ -67,6 +67,8 @@ function armarFrontend() {
   });
   const huella = crypto.createHash('sha256').update(code).digest('hex').slice(0, 12);
   html = html.slice(0, ini) + `<script src="/app.${huella}.js"></script>` + html.slice(fin + '</script>'.length);
+  // La página del alumno reemplaza este link por el de su propio manifiesto.
+  if (!html.includes('href="/manifest.webmanifest"')) throw new Error('Falta el link al manifiesto en public/index.html');
   if (fs.existsSync(XLSX_LOCAL)) {
     const antes = html;
     html = html.replace(/<script src="https:\/\/unpkg\.com\/xlsx@[^>]*><\/script>/, '<script src="/vendor/xlsx.full.min.js"></script>');
@@ -83,6 +85,15 @@ app.get('/app.:huella.js', (req, res) => {
   if (req.params.huella !== FRONT.huella) return res.status(404).end();
   res.set('Cache-Control', 'public, max-age=31536000, immutable');
   res.type('application/javascript').send(FRONT.js);
+});
+// El service worker (app instalable) se pide siempre de nuevo para que las
+// actualizaciones lleguen. Lleva su propia CSP: guarda React y las fuentes para
+// usarlas sin conexión, y eso necesita poder pedirlas a unpkg y a Google Fonts.
+app.get('/sw.js', (req, res) => {
+  res.set({ 'Cache-Control': 'no-cache',
+            'Content-Security-Policy': "default-src 'self'; connect-src 'self' https://unpkg.com " +
+              'https://fonts.googleapis.com https://fonts.gstatic.com' });
+  res.type('application/javascript').sendFile(path.join(PUBLICO, 'sw.js'));
 });
 app.use(express.static('public', { index: false }));
 
@@ -114,7 +125,21 @@ function sumarMes(fecha, ancla) {
 const aUTC = f => { const [a, m, d] = String(f).split('-').map(Number); return Date.UTC(a, m - 1, d); };
 const diasEntre = (desde, hasta) => Math.round((aUTC(hasta) - aUTC(desde)) / 864e5);
 const diaDe = f => Number(String(f).slice(8, 10));
+const dos = n => String(n).padStart(2, '0');
+// Día de la semana (0 = domingo) y sumas de días, sin depender del huso del servidor.
+const diaSemana = f => new Date(aUTC(f)).getUTCDay();
+const sumarDias = (f, n) => new Date(aUTC(f) + n * 864e5).toISOString().slice(0, 10);
+const mesAnterior = m => { const [a, n] = m.split('-').map(Number); return n === 1 ? `${a - 1}-12` : `${a}-${dos(n - 1)}`; };
+// Próximo cumpleaños a partir de hoy (el 29/02 se festeja el 28 en los años comunes).
+function proximoCumple(nacimiento, h) {
+  const [an, m, d] = String(nacimiento).split('-').map(Number);
+  const en = a => `${a}-${dos(m)}-${dos(Math.min(d, diasDelMes(a, m)))}`;
+  let f = en(Number(h.slice(0, 4)));
+  if (f < h) f = en(Number(h.slice(0, 4)) + 1);
+  return { fecha: f, dias: diasEntre(h, f), cumple: Number(f.slice(0, 4)) - an };
+}
 const VENTANA_RENOVAR = 7;   // días antes del vencimiento en que ya se puede renovar
+const DIAS_INACTIVO = 7;     // sin anotar ni venir en estos días, el alumno aparece en "Hoy"
 const ahora = () => new Date().toISOString();
 const ruta = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -194,6 +219,13 @@ const TABLAS = [
      id TEXT PRIMARY KEY, cuenta_id TEXT NOT NULL, tipo TEXT NOT NULL, texto TEXT NOT NULL,
      estado TEXT NOT NULL DEFAULT 'abierto', respuesta TEXT, creado TEXT NOT NULL, respondido TEXT)`,
   `CREATE INDEX IF NOT EXISTS ix_mensajes_cuenta ON mensajes(cuenta_id)`,
+  // Cobros: cada pago que el alumno le hace al entrenador. "vence" guarda hasta
+  // cuándo quedó el plan con ese pago, para el recibo y el historial.
+  `CREATE TABLE IF NOT EXISTS pagos (
+     id TEXT PRIMARY KEY, cuenta_id TEXT NOT NULL, cliente_id TEXT NOT NULL,
+     fecha TEXT NOT NULL, monto REAL NOT NULL, medio TEXT, nota TEXT, vence TEXT, creado TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS ix_pagos_cuenta ON pagos(cuenta_id, fecha)`,
+  `CREATE INDEX IF NOT EXISTS ix_pagos_cliente ON pagos(cliente_id, fecha)`,
   `CREATE INDEX IF NOT EXISTS ix_clientes_cuenta ON clientes(cuenta_id)`,
   `CREATE INDEX IF NOT EXISTS ix_clientes_token ON clientes(token)`,
   `CREATE INDEX IF NOT EXISTS ix_ejercicios_cuenta ON ejercicios(cuenta_id)`,
@@ -236,7 +268,12 @@ const COLUMNAS = [
   ['cuentas', 'marca_color', 'TEXT'],
   ['cuentas', 'marca_logo', 'TEXT'],        // imagen en base64
   ['cuentas', 'marca_logo_tipo', 'TEXT'],   // image/png, image/jpeg o image/webp
-  ['cuentas', 'marca_version', 'INTEGER']
+  ['cuentas', 'marca_version', 'INTEGER'],
+  // Cobros y reportes: cuota mensual, cumpleaños, alta y baja del alumno.
+  ['clientes', 'precio', 'REAL'],
+  ['clientes', 'nacimiento', 'TEXT'],
+  ['clientes', 'creado', 'TEXT'],
+  ['clientes', 'baja', 'TEXT']
 ];
 
 async function prepararBase() {
@@ -270,6 +307,12 @@ async function prepararBase() {
     await db.execute({ sql: 'UPDATE clientes SET inicio = ?, vence = ?, dia_cobro = ? WHERE id = ?',
       args: [desde, vence, ancla, c.id] });
   }
+  // Alumnos cargados antes de guardar la fecha de alta: se toma la primera rutina
+  // o el arranque del plan, lo que haya sido antes. Sirve para los reportes.
+  const primeraRutina = '(SELECT MIN(r.inicio) FROM rutinas r WHERE r.cliente_id = clientes.id)';
+  await db.execute(
+    `UPDATE clientes SET creado = MIN(COALESCE(${primeraRutina}, inicio), COALESCE(inicio, ${primeraRutina}))
+      WHERE creado IS NULL`);
   console.log('Base lista.');
 }
 
@@ -283,17 +326,17 @@ const PLANES = {
   prueba: {
     nombre: 'Gratis',
     alumnos: 3, ejercicios: 25, plantillas: 1,
-    importar: false, exportar: false, progreso: false, marca: false
+    importar: false, exportar: false, progreso: false, marca: false, reportes: false
   },
   activo: {
     nombre: 'Completo',
     alumnos: 150, ejercicios: 600, plantillas: 25,
-    importar: true, exportar: true, progreso: true, marca: true
+    importar: true, exportar: true, progreso: true, marca: true, reportes: true
   },
   pausado: {
     nombre: 'Pausado',
     alumnos: 0, ejercicios: 0, plantillas: 0,
-    importar: false, exportar: false, progreso: false, marca: false
+    importar: false, exportar: false, progreso: false, marca: false, reportes: false
   }
 };
 const limites = plan => PLANES[plan] || PLANES.prueba;
@@ -342,8 +385,10 @@ const RANGOS = {
   altura: [80, 260],      // cm
   kg: [0, 1000],          // peso levantado
   reps: [1, 500],
-  duracion: [5, 300]      // minutos de un turno
+  duracion: [5, 300],     // minutos de un turno
+  plata: [0, 100000000]   // cuota o pago, en pesos
 };
+const MEDIOS_PAGO = ['efectivo', 'transferencia', 'mercadopago', 'tarjeta', 'otro'];
 
 /* Un link de video tiene que ser un link, no código.
    Sin esto, alguien podría guardar "javascript:..." y ejecutarlo al tocarlo. */
@@ -631,17 +676,18 @@ const data = {
   cliente: async (cuentaId, id) =>
     (await data.q('SELECT * FROM clientes WHERE id = ? AND cuenta_id = ?', [id, cuentaId]))[0],
 
-  async crearCliente(cuentaId, { nombre, contacto, inicio, peso_inicial, altura, notas, turnos }) {
+  async crearCliente(cuentaId, { nombre, contacto, inicio, peso_inicial, altura, notas, turnos, precio, nacimiento }) {
     const id = uid();
     let token = codigo();
     while ((await data.q('SELECT id FROM clientes WHERE token = ?', [token])).length) token = codigo();
     await data.run(
       `INSERT INTO clientes (id, cuenta_id, nombre, contacto, inicio, token, peso_inicial, altura, notas,
-                             vence, dia_cobro)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+                             vence, dia_cobro, precio, nacimiento, creado)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [id, cuentaId, String(nombre).trim(), contacto || null, inicio || hoy(), token,
        peso_inicial ? Number(peso_inicial) : null, altura ? Number(altura) : null, notas || null,
-       sumarMes(inicio || hoy()), diaDe(inicio || hoy())]);
+       sumarMes(inicio || hoy()), diaDe(inicio || hoy()),
+       numeroEn(precio, ...RANGOS.plata), esFecha(nacimiento) ? nacimiento : null, hoy()]);
 
     // El peso inicial queda también como primer punto del seguimiento.
     if (peso_inicial)
@@ -662,18 +708,21 @@ const data = {
 
   // Si el PT cambia la fecha de arranque, el vencimiento se recalcula desde ahí.
   // Si la deja igual, se respeta el vencimiento que ya tenía (por ejemplo, tras renovar).
-  async editarCliente(cuentaId, id, { nombre, contacto, inicio, peso_inicial, altura, notas }) {
+  // Cuota y nacimiento son opcionales en el pedido: si no vienen, quedan como estaban.
+  async editarCliente(cuentaId, id, { nombre, contacto, inicio, peso_inicial, altura, notas, precio, nacimiento }) {
     const antes = await data.cliente(cuentaId, id);
     let vence = antes ? antes.vence : null, dia = antes ? antes.dia_cobro : null;
     if (!inicio) { vence = null; dia = null; }
     else if (!antes || inicio !== antes.inicio || !vence) { vence = sumarMes(inicio); dia = diaDe(inicio); }
+    const cuota = precio === undefined ? (antes ? antes.precio : null) : numeroEn(precio, ...RANGOS.plata);
+    const nace = nacimiento === undefined ? (antes ? antes.nacimiento : null) : (esFecha(nacimiento) ? nacimiento : null);
     return data.run(
       `UPDATE clientes SET nombre = ?, contacto = ?, inicio = ?, peso_inicial = ?, altura = ?, notas = ?,
-                           vence = ?, dia_cobro = ?
+                           vence = ?, dia_cobro = ?, precio = ?, nacimiento = ?
         WHERE id = ? AND cuenta_id = ?`,
       [String(nombre).trim(), contacto || null, inicio || null,
        peso_inicial ? Number(peso_inicial) : null, altura ? Number(altura) : null, notas || null,
-       vence, dia, id, cuentaId]);
+       vence, dia, cuota, nace, id, cuentaId]);
   },
 
   /* Renovar el plan (el alumno pagó otro mes).
@@ -698,8 +747,50 @@ const data = {
     return { renovado: true, inicio: h, vence, faltan: diasEntre(h, vence) };
   },
 
+  /* El alumno pagó un mes. Igual que renovar, pero si paga por adelantado
+     (más de 7 días antes del vencimiento) también cuenta: el vencimiento se
+     corre un mes sin cortar el ciclo que está haciendo. */
+  async pagarPlan(cuentaId, clienteId) {
+    const r = await data.renovarPlan(cuentaId, clienteId);
+    if (!r || r.renovado) return r;
+    const c = await data.cliente(cuentaId, clienteId);
+    const dia = c.dia_cobro || diaDe(c.vence);
+    const vence = sumarMes(c.vence, dia);
+    await data.run('UPDATE clientes SET vence = ?, dia_cobro = ? WHERE id = ? AND cuenta_id = ?',
+      [vence, dia, clienteId, cuentaId]);
+    return { renovado: true, adelantado: true, inicio: c.inicio, vence, faltan: diasEntre(hoy(), vence) };
+  },
+
+  /* --- cobros --- */
+  // renovar = false solo anota la plata (por ejemplo, si el plan ya se renovó con la rutina).
+  async registrarPago(cuentaId, clienteId, { monto, medio, fecha, nota, renovar }) {
+    const c = await data.cliente(cuentaId, clienteId);
+    if (!c || !c.activo) return null;
+    const plan = renovar ? await data.pagarPlan(cuentaId, clienteId) : null;
+    const id = uid();
+    const vence = plan ? plan.vence : c.vence;
+    await data.run(
+      `INSERT INTO pagos (id, cuenta_id, cliente_id, fecha, monto, medio, nota, vence, creado)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+      [id, cuentaId, clienteId, fecha || hoy(), monto, medio || null, nota || null, vence || null, ahora()]);
+    return { id, fecha: fecha || hoy(), monto, medio: medio || null, vence: vence || null, plan };
+  },
+
+  pagosDe: (cuentaId, clienteId) =>
+    data.q(`SELECT * FROM pagos WHERE cuenta_id = ? AND cliente_id = ?
+             ORDER BY fecha DESC, creado DESC LIMIT 60`, [cuentaId, clienteId]),
+
+  // Borrar un pago cargado por error. El vencimiento del plan no se toca.
+  async borrarPago(cuentaId, id) {
+    const p = (await data.q('SELECT id FROM pagos WHERE id = ? AND cuenta_id = ?', [id, cuentaId]))[0];
+    if (!p) return false;
+    await data.run('DELETE FROM pagos WHERE id = ? AND cuenta_id = ?', [id, cuentaId]);
+    return true;
+  },
+
   borrarCliente: (cuentaId, id) =>
-    data.run('UPDATE clientes SET activo = 0 WHERE id = ? AND cuenta_id = ?', [id, cuentaId]),
+    data.run('UPDATE clientes SET activo = 0, baja = ? WHERE id = ? AND cuenta_id = ? AND activo = 1',
+      [hoy(), id, cuentaId]),
 
   /* --- rutinas --- */
   rutinasDe: (cuentaId, clienteId) =>
@@ -1538,6 +1629,174 @@ const data = {
     return true;
   },
 
+  /* --- pantalla "Hoy": lo que el entrenador tiene que mirar al abrir la app --- */
+  async tablero(cuenta) {
+    const cuentaId = cuenta.id, h = hoy();
+    const clientes = await data.clientes(cuentaId);
+    const porId = new Map(clientes.map(c => [c.id, c]));
+    const turnos = marcarChoques(await data.turnos(cuentaId), cuenta.capacidad);
+    const estado = {};
+    (await data.asistenciasDe(cuentaId, h)).forEach(a => { estado[a.cliente_id] = a.estado; });
+    const delDia = f => turnos.filter(t => t.dia_semana === diaSemana(f))
+      .sort((a, b) => a.hora.localeCompare(b.hora))
+      .map(t => Object.assign({}, t, { contacto: (porId.get(t.cliente_id) || {}).contacto || null,
+                                       asistencia: estado[t.cliente_id] || null }));
+
+    // Planes que vencen esta semana o que vencieron hace menos de un mes.
+    const vencen = clientes.filter(c => c.vence && esFecha(c.vence))
+      .map(c => ({ id: c.id, nombre: c.nombre, contacto: c.contacto, precio: c.precio,
+                   vence: c.vence, dias: diasEntre(h, c.vence) }))
+      .filter(c => c.dias <= VENTANA_RENOVAR && c.dias >= -30)
+      .sort((a, b) => a.dias - b.dias);
+
+    // Alumnos que hace días no anotan series ni vienen. Sin nada anotado,
+    // se cuenta desde que tienen su primera rutina.
+    const actividad = await data.q(
+      `SELECT c.id,
+              (SELECT MAX(s.fecha) FROM series_log s WHERE s.cliente_id = c.id AND s.cuenta_id = c.cuenta_id) AS serie,
+              (SELECT MAX(a.fecha) FROM asistencias a WHERE a.cliente_id = c.id AND a.cuenta_id = c.cuenta_id
+                  AND a.estado = 'presente') AS vino,
+              (SELECT MIN(r.inicio) FROM rutinas r WHERE r.cliente_id = c.id AND r.cuenta_id = c.cuenta_id) AS rutina
+         FROM clientes c WHERE c.cuenta_id = ? AND c.activo = 1`, [cuentaId]);
+    const inactivos = [];
+    for (const a of actividad) {
+      const ultima = [a.serie, a.vino].filter(f => f && f <= h).sort().pop() || null;
+      const desde = ultima || a.rutina;
+      if (!desde || desde > h) continue;
+      const dias = diasEntre(desde, h);
+      if (dias < DIAS_INACTIVO) continue;
+      const c = porId.get(a.id);
+      inactivos.push({ id: c.id, nombre: c.nombre, contacto: c.contacto, ultima, dias });
+    }
+    inactivos.sort((x, y) => x.dias - y.dias);   // primero los que recién se cortaron: son los que se recuperan
+
+    const observaciones = await data.q(
+      `SELECT o.id, o.cliente_id, o.fecha, o.texto, c.nombre AS alumno, e.nombre AS ejercicio
+         FROM observaciones o
+         JOIN clientes c ON c.id = o.cliente_id AND c.cuenta_id = o.cuenta_id
+         LEFT JOIN ejercicios e ON e.id = o.ejercicio_id AND e.cuenta_id = o.cuenta_id
+        WHERE o.cuenta_id = ? AND c.activo = 1 AND o.fecha >= ?
+        ORDER BY o.creado DESC LIMIT 20`, [cuentaId, sumarDias(h, -3)]);
+
+    const cumples = clientes.filter(c => esFecha(c.nacimiento))
+      .map(c => Object.assign({ id: c.id, nombre: c.nombre, contacto: c.contacto }, proximoCumple(c.nacimiento, h)))
+      .filter(c => c.dias <= 7)
+      .sort((a, b) => a.dias - b.dias);
+
+    const mes = h.slice(0, 7);
+    const caja = (await data.q(
+      `SELECT COALESCE(SUM(monto), 0) AS total, COUNT(*) AS n FROM pagos
+        WHERE cuenta_id = ? AND fecha >= ? AND fecha < ?`, [cuentaId, mes + '-01', sumarMes(mes + '-01', 1)]))[0];
+
+    return {
+      fecha: h, alumnos: clientes.length,
+      turnos_hoy: delDia(h), turnos_manana: delDia(sumarDias(h, 1)),
+      vencen, inactivos: inactivos.slice(0, 15), observaciones, cumples,
+      caja: { mes, cobrado: Number(caja.total), pagos: Number(caja.n) }
+    };
+  },
+
+  /* --- negocio: cobros del mes y, con el plan completo, reportes --- */
+  async negocio(cuenta, mes, conReportes) {
+    const cuentaId = cuenta.id, h = hoy();
+    const desde = mes + '-01', hasta = sumarMes(desde, 1);   // hasta: primer día del mes siguiente
+    const pagos = await data.q(
+      `SELECT p.id, p.cliente_id, p.fecha, p.monto, p.medio, p.nota, p.vence, c.nombre AS alumno
+         FROM pagos p JOIN clientes c ON c.id = p.cliente_id AND c.cuenta_id = p.cuenta_id
+        WHERE p.cuenta_id = ? AND p.fecha >= ? AND p.fecha < ?
+        ORDER BY p.fecha DESC, p.creado DESC`, [cuentaId, desde, hasta]);
+    const cobrado = pagos.reduce((s, p) => s + Number(p.monto || 0), 0);
+    const medios = {};
+    for (const p of pagos) {
+      const k = p.medio || '';   // sin medio: la app lo muestra como "Sin especificar"
+      medios[k] = medios[k] || { medio: k, total: 0, n: 0 };
+      medios[k].total += Number(p.monto || 0); medios[k].n++;
+    }
+
+    const clientes = await data.clientes(cuentaId);
+    const fila = c => ({ id: c.id, nombre: c.nombre, contacto: c.contacto, precio: c.precio, vence: c.vence });
+    const deudores = clientes.filter(c => c.vence && esFecha(c.vence) && c.vence < h)
+      .map(c => Object.assign(fila(c), { dias: diasEntre(c.vence, h) }))
+      .sort((a, b) => b.dias - a.dias);
+    const proximos = clientes.filter(c => c.vence && esFecha(c.vence) && c.vence >= h && c.vence >= desde && c.vence < hasta)
+      .map(c => Object.assign(fila(c), { dias: diasEntre(h, c.vence) }))
+      .sort((a, b) => a.dias - b.dias);
+    const porCobrar = [...deudores, ...proximos];
+
+    const r = {
+      mes, desde, hoy: h,
+      caja: {
+        cobrado, pagos: pagos.length, ticket: pagos.length ? cobrado / pagos.length : 0,
+        por_medio: Object.values(medios).sort((a, b) => b.total - a.total),
+        a_cobrar: porCobrar.reduce((s, c) => s + Number(c.precio || 0), 0),
+        sin_precio: porCobrar.filter(c => c.precio == null).length
+      },
+      pagos, deudores, proximos,
+      reportes: null
+    };
+    if (!conReportes) return r;
+
+    // Ingresos de los últimos 12 meses, hasta el mes elegido.
+    const meses = [mes];
+    while (meses.length < 12) meses.unshift(mesAnterior(meses[0]));
+    const porMes = await data.q(
+      `SELECT substr(fecha, 1, 7) AS mes, SUM(monto) AS total, COUNT(*) AS n FROM pagos
+        WHERE cuenta_id = ? AND fecha >= ? AND fecha < ? GROUP BY substr(fecha, 1, 7)`,
+      [cuentaId, meses[0] + '-01', hasta]);
+    const ingresos = meses.map(m => {
+      const f = porMes.find(x => x.mes === m);
+      return { mes: m, total: f ? Number(f.total) : 0, pagos: f ? Number(f.n) : 0 };
+    });
+
+    // Altas y bajas. Los alumnos borrados antes de guardar la fecha de baja no se cuentan.
+    const todos = await data.q('SELECT activo, creado, baja FROM clientes WHERE cuenta_id = ?', [cuentaId]);
+    const conocidos = todos.filter(c => c.creado && (c.activo || c.baja));
+    const movimiento = meses.slice(-6).map(m => ({
+      mes: m,
+      altas: conocidos.filter(c => c.creado.slice(0, 7) === m).length,
+      bajas: conocidos.filter(c => c.baja && c.baja.slice(0, 7) === m).length
+    }));
+    const alInicio = conocidos.filter(c => c.creado < desde && (!c.baja || c.baja >= desde));
+    const seFueron = alInicio.filter(c => c.baja && c.baja < hasta).length;
+
+    const asis = { presente: 0, ausente: 0 };
+    (await data.q(
+      `SELECT estado, COUNT(*) AS n FROM asistencias WHERE cuenta_id = ? AND fecha >= ? AND fecha < ? GROUP BY estado`,
+      [cuentaId, desde, hasta])).forEach(f => { asis[f.estado] = Number(f.n); });
+    const entreno = (await data.q(
+      `SELECT COUNT(DISTINCT cliente_id) AS alumnos, COUNT(DISTINCT cliente_id || '|' || fecha) AS sesiones
+         FROM series_log WHERE cuenta_id = ? AND fecha >= ? AND fecha < ?`, [cuentaId, desde, hasta]))[0];
+
+    // Horarios más pedidos, según la agenda fija de los alumnos activos.
+    const turnos = await data.turnos(cuentaId);
+    const franjas = new Map();
+    for (const t of turnos) {
+      const k = t.dia_semana + '|' + t.hora;
+      franjas.set(k, (franjas.get(k) || 0) + 1);
+    }
+    const horarios = [...franjas.entries()]
+      .map(([k, n]) => ({ dia_semana: Number(k.split('|')[0]), hora: k.split('|')[1], alumnos: n }))
+      .sort((a, b) => b.alumnos - a.alumnos || a.dia_semana - b.dia_semana || a.hora.localeCompare(b.hora))
+      .slice(0, 6);
+    const porDia = [0, 1, 2, 3, 4, 5, 6].map(d => turnos.filter(t => t.dia_semana === d).length);
+
+    r.reportes = {
+      ingresos, movimiento,
+      alumnos: {
+        activos: clientes.length,
+        altas: conocidos.filter(c => c.creado >= desde && c.creado < hasta).length,
+        bajas: conocidos.filter(c => c.baja && c.baja >= desde && c.baja < hasta).length,
+        al_inicio: alInicio.length,
+        retencion: alInicio.length ? Math.round((1 - seFueron / alInicio.length) * 100) : null
+      },
+      asistencia: Object.assign(asis, {
+        porcentaje: asis.presente + asis.ausente ? Math.round(asis.presente / (asis.presente + asis.ausente) * 100) : null }),
+      entrenamiento: { alumnos: Number(entreno.alumnos), sesiones: Number(entreno.sesiones) },
+      horarios, por_dia: porDia, capacidad: cuenta.capacidad || 1
+    };
+    return r;
+  },
+
   clientePorToken: async token =>
     (await data.q('SELECT * FROM clientes WHERE token = ? AND activo = 1', [token]))[0]
 };
@@ -1921,6 +2180,10 @@ function revisarAlumno(b) {
   if (b.altura !== '' && b.altura != null && numeroEn(b.altura, ...RANGOS.altura) === null)
     return 'La altura tiene que estar entre 80 y 260 cm.';
   if (String(b.notas || '').length > 2000) return 'Las anotaciones son muy largas.';
+  if (b.precio !== '' && b.precio != null && numeroEn(b.precio, ...RANGOS.plata) === null)
+    return 'La cuota no es válida.';
+  if (b.nacimiento && (!esFecha(b.nacimiento) || b.nacimiento < '1900-01-01' || b.nacimiento > hoy()))
+    return 'La fecha de nacimiento no es válida.';
   return null;
 }
 
@@ -2049,6 +2312,53 @@ app.delete('/api/items/:id', auth, ruta(async (req, res) => {
 app.post('/api/clientes/:id/renovar-plan', auth, ruta(async (req, res) => {
   const r = await data.renovarPlan(req.cuentaId, req.params.id);
   if (!r) return res.status(404).json({ error: 'No encontramos ese alumno.' });
+  res.json(r);
+}));
+
+/* ------------------------------------------------------------------
+   COBROS
+   Registrar un pago anota la plata y, salvo que se pida lo contrario,
+   renueva el plan un mes (también si paga por adelantado).
+------------------------------------------------------------------- */
+app.get('/api/clientes/:id/pagos', auth, ruta(async (req, res) => {
+  if (!await data.cliente(req.cuentaId, req.params.id))
+    return res.status(404).json({ error: 'No encontramos ese alumno.' });
+  res.json(await data.pagosDe(req.cuentaId, req.params.id));
+}));
+
+app.post('/api/clientes/:id/pagos', auth, ruta(async (req, res) => {
+  const b = req.body || {};
+  const monto = numeroEn(b.monto, ...RANGOS.plata);
+  if (monto === null || monto <= 0) return res.status(400).json({ error: 'Poné cuánto pagó.' });
+  if (b.medio && !MEDIOS_PAGO.includes(b.medio)) return res.status(400).json({ error: 'Ese medio de pago no existe.' });
+  if (b.fecha && (!esFecha(b.fecha) || b.fecha > hoy() || b.fecha < '2000-01-01'))
+    return res.status(400).json({ error: 'La fecha del pago no es válida.' });
+  const nota = String(b.nota || '').trim();
+  if (nota.length > 300) return res.status(400).json({ error: 'La nota es muy larga.' });
+  const r = await data.enTransaccion(() => data.registrarPago(req.cuentaId, req.params.id,
+    { monto, medio: b.medio || null, fecha: b.fecha || null, nota: nota || null, renovar: b.renovar !== false }));
+  if (!r) return res.status(404).json({ error: 'No encontramos ese alumno.' });
+  res.json(r);
+}));
+
+app.delete('/api/pagos/:id', auth, ruta(async (req, res) => {
+  if (!await data.borrarPago(req.cuentaId, req.params.id))
+    return res.status(404).json({ error: 'No encontramos ese pago.' });
+  res.json({ ok: true });
+}));
+
+/* ------------------------------------------------------------------
+   HOY Y NEGOCIO
+------------------------------------------------------------------- */
+app.get('/api/hoy', auth, ruta(async (req, res) => res.json(await data.tablero(req.cuenta))));
+
+app.get('/api/negocio', auth, ruta(async (req, res) => {
+  const mes = req.query.mes ? String(req.query.mes) : hoy().slice(0, 7);
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(mes) || mes < '2000-01')
+    return res.status(400).json({ error: 'Ese mes no es válido.' });
+  const conReportes = !!limites(req.cuenta.plan).reportes;
+  const r = await data.negocio(req.cuenta, mes, conReportes);
+  if (!conReportes) r.reportes_bloqueados = true;
   res.json(r);
 }));
 
@@ -2401,7 +2711,8 @@ app.delete('/api/admin/cuentas/:id', auth, soloAdmin, ruta(async (req, res) => {
     return res.status(400).json({ error: 'No podés eliminar tu propia cuenta de administración.' });
   for (const t of ['seguimiento', 'series_log', 'rutina_items', 'rutina_dias', 'rutinas',
                    'plantilla_items', 'plantilla_dias', 'plantillas', 'turnos', 'clientes',
-                   'ejercicios', 'grupos', 'mensajes', 'asistencias', 'observaciones', 'indicaciones'])
+                   'ejercicios', 'grupos', 'mensajes', 'asistencias', 'observaciones', 'indicaciones',
+                   'pagos', 'recuperaciones'])
     await data.run(`DELETE FROM ${t} WHERE cuenta_id = ?`, [id]);
   await data.run('DELETE FROM cuentas WHERE id = ?', [id]);
   res.json({ ok: true });
@@ -2500,7 +2811,8 @@ app.get('/api/admin/metricas', auth, soloAdmin, ruta(async (req, res) => {
 app.get('/api/exportar', auth, ruta(async (req, res) => {
   const id = req.cuentaId;
   const clientes = await data.q(
-    'SELECT nombre, contacto, inicio, peso_inicial, altura, notas FROM clientes WHERE cuenta_id = ? AND activo = 1', [id]);
+    `SELECT nombre, contacto, inicio, vence, precio AS cuota, nacimiento, peso_inicial, altura, notas
+       FROM clientes WHERE cuenta_id = ? AND activo = 1`, [id]);
   const ejercicios = await data.q(
     'SELECT nombre, grupo, video_url FROM ejercicios WHERE cuenta_id = ?', [id]);
   const rutinas = await data.q(
@@ -2528,8 +2840,12 @@ app.get('/api/exportar', auth, ruta(async (req, res) => {
     `SELECT c.nombre AS alumno, g.fecha, g.semana, g.peso, g.nota
        FROM seguimiento g JOIN clientes c ON c.id = g.cliente_id
       WHERE g.cuenta_id = ? ORDER BY g.fecha DESC`, [id]);
+  const pagos = await data.q(
+    `SELECT c.nombre AS alumno, p.fecha, p.monto, p.medio, p.vence AS plan_hasta, p.nota
+       FROM pagos p JOIN clientes c ON c.id = p.cliente_id
+      WHERE p.cuenta_id = ? ORDER BY p.fecha DESC`, [id]);
   res.json({ generado: ahora(), cuenta: req.cuenta.nombre,
-             clientes, ejercicios, rutinas, turnos, registros, seguimiento });
+             clientes, ejercicios, rutinas, turnos, registros, seguimiento, pagos });
 }));
 
 app.get('/api/admin/mensajes', auth, soloAdmin, ruta(async (req, res) =>
@@ -2755,8 +3071,54 @@ app.post('/api/alumno/:token/seguimiento', ruta(async (req, res) => {
 
 app.get('/api/salud', (req, res) => res.json({ ok: true }));
 
-// Link corto y prolijo para el alumno: /r/CODIGO
-app.get('/r/:token', enviarApp);
+/* ------------------------------------------------------------------
+   APP INSTALABLE (PWA)
+   El entrenador instala la app general. El alumno instala SU rutina: el
+   manifiesto de /r/CODIGO arranca en su link, con el nombre de la marca
+   del profe si la tiene. El trabajo sin conexión lo hace public/sw.js.
+------------------------------------------------------------------- */
+const TOKEN_OK = /^[a-f0-9]{10,32}$/;
+const ICONOS = [
+  { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+  { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+  { src: '/icons/icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
+];
+const manifiesto = (extra = {}) => Object.assign({
+  id: '/', name: 'SmartTrainner', short_name: 'SmartTrainner',
+  description: 'Rutinas, agenda, cobros y seguimiento de tus alumnos.',
+  lang: 'es-AR', dir: 'ltr', start_url: '/', scope: '/', display: 'standalone', orientation: 'portrait',
+  background_color: '#FBF9F7', theme_color: '#E8621F', icons: ICONOS
+}, extra);
+const enviarManifiesto = (res, m) => {
+  res.set('Cache-Control', 'no-cache');
+  res.type('application/manifest+json').send(JSON.stringify(m));
+};
+
+app.get('/manifest.webmanifest', (req, res) => enviarManifiesto(res, manifiesto()));
+
+app.get('/r/:token/manifest.webmanifest', ruta(async (req, res) => {
+  const t = String(req.params.token || '');
+  if (!TOKEN_OK.test(t)) return enviarManifiesto(res, manifiesto());
+  const propio = { id: '/r/' + t, name: 'Mi rutina', short_name: 'Mi rutina', start_url: '/r/' + t, scope: '/r/' + t };
+  // Mismo freno que el resto de las rutas del alumno contra quien prueba códigos.
+  if (!limitar('linkmal:' + req.ip, 30, 15, true)) return enviarManifiesto(res, manifiesto(propio));
+  const c = await data.clientePorToken(t);
+  if (!c) { limitar('linkmal:' + req.ip, 30, 15); return enviarManifiesto(res, manifiesto(propio)); }
+  const cta = await data.cuenta(c.cuenta_id);
+  if (marcaVisible(cta)) {
+    if (cta.marca_nombre) Object.assign(propio, { name: cta.marca_nombre, short_name: cta.marca_nombre.slice(0, 15) });
+    if (cta.marca_color) propio.theme_color = cta.marca_color;
+  }
+  enviarManifiesto(res, manifiesto(propio));
+}));
+
+// Link corto y prolijo para el alumno: /r/CODIGO. La página apunta a su propio manifiesto.
+app.get('/r/:token', (req, res) => {
+  const t = String(req.params.token || '');
+  if (!TOKEN_OK.test(t)) return enviarApp(req, res);
+  res.set('Cache-Control', 'no-cache');
+  res.type('html').send(FRONT.html.replace('href="/manifest.webmanifest"', `href="/r/${t}/manifest.webmanifest"`));
+});
 
 app.use((err, req, res, next) => {
   console.error('Error en', req.method, req.path, '->', err.message);

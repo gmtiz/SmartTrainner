@@ -9,6 +9,7 @@ Idioma: el código, los comentarios, los mensajes de error y la UI están en **e
 - **Backend:** Node >= 18, Express 4, `@libsql/client` (Turso/SQLite), `jsonwebtoken`, `bcryptjs`. Todo el backend está en un solo archivo: `server.js`.
 - **Frontend:** un único `public/index.html` con React en JSX dentro de `<script type="text/babel">`. El servidor lo **compila con Babel al arrancar** (`armarFrontend()` en `server.js`) y lo sirve como `/app.<huella>.js`. Hay que reiniciar el servidor para ver cambios en el frontend.
 - `public/plantilla-carga.xlsx`: plantilla de Excel para importar ejercicios/rutinas. Si existe `public/vendor/xlsx.full.min.js` se usa en lugar de la copia de unpkg.
+- **App instalable (PWA):** `/manifest.webmanifest` (entrenador) y `/r/:token/manifest.webmanifest` (alumno, arranca en su rutina y lleva la marca del profe). `/r/:token` reemplaza el link del manifiesto en el HTML: no sacar `href="/manifest.webmanifest"` de `index.html` (el arranque lo exige). `public/sw.js` es el service worker: solo guarda páginas, código, íconos, React/fuentes y `GET /api/alumno/...`; **nunca datos del entrenador**. Si se cambia cómo guarda, subir `VERSION`. Se sirve con su propia CSP (necesita `connect-src` a unpkg y Google Fonts). Íconos en `public/icons/`.
 
 ## Comandos
 
@@ -30,9 +31,12 @@ TURSO_URL="file:test.db" JWT_SECRET="test123456" PORT=3210 npm start
 node pruebas.js            # API general
 node pruebas-plan.js       # plan mensual, renovación, login (toca la base directo)
 node pruebas-seguridad.js  # importación, cookie de sesión, admin, marca propia
+node pruebas-negocio.js    # cobros, pantalla Hoy, reportes, app instalable (toca la base directo)
 ```
 
-En PowerShell: `$env:TURSO_URL="file:test.db"; $env:JWT_SECRET="test123456"; $env:PORT=3210; npm start`. Antes de cada cambio en el backend, correr las tres.
+En PowerShell: `$env:TURSO_URL="file:test.db"; $env:JWT_SECRET="test123456"; $env:PORT=3210; npm start`. Antes de cada cambio en el backend, correr las cuatro, con la base de prueba borrada antes (`test.db*`): `pruebas.js` cuenta cuentas y alumnos y falla sobre una base usada. `pruebas-seguridad.js` firma sesiones con `JWT_SECRET`: tiene que ser el mismo que usa el servidor.
+
+**Node:** `@babel/core` 8 es solo ESM y `server.js` lo carga con `require()`. Eso necesita Node >= 20.19 o >= 22.12; con Node 20.17 el servidor no arranca (`ERR_REQUIRE_ESM`). En esta máquina hay Node 22.13 instalado con nvm.
 
 ## Arquitectura (server.js)
 
@@ -42,6 +46,9 @@ En PowerShell: `$env:TURSO_URL="file:test.db"; $env:JWT_SECRET="test123456"; $en
 - **Aislamiento por cuenta:** casi toda tabla tiene `cuenta_id`, y toda consulta debe filtrar por `req.cuentaId`. No escribir consultas que lean o modifiquen por `id` sin ese filtro.
 - Los ids se generan con `uid()` (hex), los links de alumno con `codigo()` (16 caracteres).
 - Planes: vencen el mismo día del mes siguiente (`sumarMes`, con `dia_cobro` como ancla); se puede renovar `VENTANA_RENOVAR` (7) días antes.
+- Cobros: tabla `pagos`. `POST /api/clientes/:id/pagos` anota el pago y renueva el plan (`data.pagarPlan`: como `renovarPlan`, pero si paga por adelantado corre el vencimiento un mes sin cortar el ciclo). Con `renovar: false` solo anota la plata. Borrar un pago no toca el vencimiento. `clientes` guarda `precio` (cuota), `nacimiento`, `creado` (alta) y `baja` (la pone `borrarCliente`), que usan los reportes.
+- `GET /api/hoy` arma la pantalla de inicio (`data.tablero`). `GET /api/negocio?mes=AAAA-MM` devuelve la caja del mes para todos los planes, y `reportes` solo con `limites(plan).reportes` (plan completo).
+- Recordatorios: el frontend arma links `wa.me` con el texto escrito (`MENSAJE`, `numeroWhatsApp` normaliza teléfonos argentinos). No hay envío automático ni API de WhatsApp.
 
 ## Seguridad (no romper)
 

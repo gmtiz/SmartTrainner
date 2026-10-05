@@ -4,6 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>SmartTrainner</title>
+<!-- App instalable: en la página del alumno el servidor cambia este link por el de su rutina. -->
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#E8621F">
+<link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=Public+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -587,6 +595,53 @@
   .tabla th{color:var(--gris);font-size:12.5px;font-weight:600}
   .tabla td b{font-family:var(--tit),sans-serif;font-variant-numeric:tabular-nums}
 
+  /* ---------- pantalla Hoy y negocio ---------- */
+  .saludo{margin-bottom:14px}
+  .saludo p{color:var(--gris);font-size:14.5px;margin-top:2px}
+  .bloque-hoy > .row{margin-bottom:4px}
+  .bloque-hoy .cuenta{
+    font-family:var(--tit),sans-serif;font-size:12.5px;font-weight:700;color:var(--gris);
+    background:var(--globo-fondo);border-radius:99px;padding:2px 9px;margin-left:6px;
+  }
+  .fila-hoy{display:flex;align-items:center;gap:10px;padding:11px 0;border-top:1px solid var(--borde);flex-wrap:wrap}
+  .fila-hoy:first-of-type{border-top:0}
+  .fila-hoy .quien{flex:1 1 160px;min-width:0}
+  .fila-hoy .quien b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .fila-hoy .quien button{
+    display:block;background:none;border:0;padding:0;font:inherit;color:inherit;cursor:pointer;text-align:left;max-width:100%;
+  }
+  .fila-hoy .quien > .chico{display:block}
+  .fila-hoy .quien button:hover b{color:var(--acento-texto)}
+  .fila-hoy .acciones{flex:0 0 auto}
+  .fila-hoy .horario{font-size:17px;min-width:50px}
+  a.btn{text-decoration:none;display:inline-block;text-align:center}
+  .todo-ok{color:var(--gris);font-size:14.5px;padding:4px 0}
+  .monto{font-family:var(--tit),sans-serif;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .navmes{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+  .navmes .mini{width:34px;height:34px;font-size:18px;font-weight:700;color:var(--tinta)}
+  .navmes b{font-family:var(--tit),sans-serif;font-size:17px;flex:1;text-align:center}
+  .barras.ingresos{height:150px}
+  .barras.ingresos .barra-col{min-width:0}
+  .barras.ingresos .chico{font-size:10.5px;white-space:nowrap}
+  .barras .col.actual{background:var(--acento-hover)}
+  .barra-medio{height:8px;background:var(--borde);border-radius:99px;overflow:hidden;margin:4px 0 10px}
+  .barra-medio i{display:block;height:100%;background:var(--acento);border-radius:99px}
+  .bloqueado{border-style:dashed}
+
+  /* ---------- app instalable y sin conexión ---------- */
+  .instalar{
+    display:flex;gap:12px;align-items:center;background:var(--hoja);border:1px solid var(--borde);
+    border-left:4px solid var(--acento);border-radius:var(--r);padding:12px 14px;margin-bottom:14px;flex-wrap:wrap;
+  }
+  .instalar img{width:40px;height:40px;border-radius:9px;flex:0 0 40px}
+  .instalar .que{flex:1 1 180px;min-width:0}
+  .instalar .que b{font-family:var(--tit),sans-serif}
+  .instalar .que p{font-size:13.5px;color:var(--gris)}
+  .sin-conexion{
+    background:var(--aviso-suave);color:var(--aviso-texto);font-size:13.5px;font-weight:600;
+    text-align:center;padding:8px 14px;border-bottom:1px solid var(--borde);
+  }
+
   @media (max-width:430px){
     .dos{grid-template-columns:1fr}
     h2{font-size:22px}
@@ -724,6 +779,131 @@ function estadoPlan(c) {
   if (d <= 7) return { texto: 'Quedan ' + d + (d === 1 ? ' día' : ' días'), clase: 'aviso' };
   if (c.inicio > hoyISO()) return { texto: 'Arranca el ' + fmtLargo(c.inicio), clase: 'ok' };
   return { texto: 'Semana ' + semanaCiclo(c), clase: 'ok' };
+}
+
+/* ---------- plata y meses ---------- */
+const plata = n => '$' + Math.round(Number(n) || 0).toLocaleString('es-AR');
+const MEDIOS = [['efectivo', 'Efectivo'], ['transferencia', 'Transferencia'], ['mercadopago', 'Mercado Pago'],
+                ['tarjeta', 'Tarjeta'], ['otro', 'Otro']];
+const nombreMedio = m => (MEDIOS.find(x => x[0] === m) || [null, 'Sin especificar'])[1];
+const MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto',
+               'septiembre', 'octubre', 'noviembre', 'diciembre'];
+const nombreMes = m => { const [a, n] = m.split('-').map(Number); return MESES[n - 1] + ' ' + a; };
+const mesCorto = m => MESES[Number(m.slice(5, 7)) - 1].slice(0, 3);
+const moverMes = (m, n) => { const [a, x] = m.split('-').map(Number); const t = a * 12 + (x - 1) + n;
+  return Math.floor(t / 12) + '-' + String(t % 12 + 1).padStart(2, '0'); };
+const primerNombre = n => (n || '').trim().split(/\s+/)[0] || '';
+
+/* ---------- WhatsApp ----------
+   Los recordatorios abren WhatsApp con el mensaje escrito: el PT solo toca Enviar.
+   El número sale del contacto del alumno ("11 5555-4444", "0351 15 444-5555",
+   "+54 9 11 ..."). Si no hay teléfono, WhatsApp pide elegir el contacto. */
+function numeroWhatsApp(contacto) {
+  const t = String(contacto || '').trim();
+  if (!t || t.includes('@')) return null;
+  let d = t.replace(/\D/g, '');
+  if (d.length < 8) return null;
+  if (t.startsWith('+') || (d.startsWith('54') && d.length >= 12)) {
+    if (d.startsWith('54') && !d.startsWith('549') && d.length === 12) d = '549' + d.slice(2);  // le falta el 9 de celular
+    return d;
+  }
+  if (d.startsWith('0')) d = d.slice(1);   // 011..., 0351...
+  if (d.length === 12) {                   // característica + 15 + número: se saca el 15
+    const m = d.match(/^(\d{2,4})15(\d{6,8})$/);
+    if (m && (m[1] + m[2]).length === 10) d = m[1] + m[2];
+  }
+  if (d.length === 10) return '549' + d;
+  return d.length >= 11 ? d : null;
+}
+const linkWhatsApp = (contacto, texto) =>
+  'https://wa.me/' + (numeroWhatsApp(contacto) || '') + '?text=' + encodeURIComponent(texto);
+
+const MENSAJE = {
+  vence: c => {
+    const d = diasEntre(hoyISO(), c.vence);
+    const cuando = d < 0 ? 'venció el ' + fmtLargo(c.vence) : d === 0 ? 'vence hoy'
+      : d === 1 ? 'vence mañana' : 'vence el ' + fmtLargo(c.vence);
+    return `¡Hola ${primerNombre(c.nombre)}! Te recuerdo que tu plan ${cuando}.` +
+      (c.precio ? ` La cuota es de ${plata(c.precio)}.` : '') + ' Cualquier cosa avisame. ¡Gracias!';
+  },
+  turno: (nombre, horaTurno, cuando) =>
+    `¡Hola ${primerNombre(nombre)}! Te espero ${cuando} a las ${horaTurno} para entrenar. ¡Nos vemos!`,
+  inactivo: (nombre, dias) =>
+    `¡Hola ${primerNombre(nombre)}! Hace ${dias} días que no te veo entrenar. ¿Está todo bien? Cuando quieras retomamos, te espero.`,
+  cumple: nombre => `¡Feliz cumpleaños, ${primerNombre(nombre)}! 🎉 Que tengas un gran día. ¡Un abrazo!`,
+  recibo: (nombre, monto, vence) => `¡Hola ${primerNombre(nombre)}! Recibí tu pago de ${plata(monto)}.` +
+    (vence ? ` Tu plan queda al día hasta el ${fmtLargo(vence)}.` : '') + ' ¡Gracias!'
+};
+
+function BotonWhatsApp({ contacto, texto, children, principal, clase }) {
+  const conNumero = !!numeroWhatsApp(contacto);
+  return (
+    <a className={clase || ('btn chico ' + (principal ? '' : 'linea'))} href={linkWhatsApp(contacto, texto)}
+      target="_blank" rel="noopener"
+      title={conNumero ? 'Abre WhatsApp con el mensaje listo' : 'Sin teléfono cargado: elegís el contacto en WhatsApp'}>
+      {children || 'WhatsApp'}</a>);
+}
+
+/* ---------- app instalable ----------
+   Android/Chrome avisa que se puede instalar (beforeinstallprompt) y lo guardamos
+   para ofrecer el botón cuando convenga. En iPhone se explica cómo hacerlo a mano. */
+let pedidoInstalar = null;
+const avisosInstalar = new Set();
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault(); pedidoInstalar = e; avisosInstalar.forEach(f => f()); });
+window.addEventListener('appinstalled', () => { pedidoInstalar = null; avisosInstalar.forEach(f => f()); });
+const yaInstalada = () => (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
+  navigator.standalone === true;
+const esIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+  const registrar = () => navigator.serviceWorker.register('/sw.js').catch(() => { /* sin modo offline, igual anda */ });
+  if (document.readyState === 'complete') registrar(); else window.addEventListener('load', registrar);
+}
+
+function usarInstalacion() {
+  const [, refrescar] = useState(0);
+  useEffect(() => {
+    const f = () => refrescar(n => n + 1);
+    avisosInstalar.add(f);
+    return () => { avisosInstalar.delete(f); };
+  }, []);
+  return {
+    instalada: yaInstalada(),
+    puede: !!pedidoInstalar,
+    ios: esIOS() && !yaInstalada(),
+    async instalar() {
+      const p = pedidoInstalar;
+      if (!p) return false;
+      p.prompt();
+      const r = await p.userChoice.catch(() => null);
+      pedidoInstalar = null; avisosInstalar.forEach(f => f());
+      return !!r && r.outcome === 'accepted';
+    }
+  };
+}
+
+function AvisoInstalar({ titulo, texto, clave }) {
+  const ins = usarInstalacion();
+  const [cerrado, setCerrado] = useState(() => { try { return localStorage.getItem(clave) === '1'; } catch { return false; } });
+  const [comoIOS, setComoIOS] = useState(false);
+  if (ins.instalada || cerrado || (!ins.puede && !ins.ios)) return null;
+  const cerrar = () => { setCerrado(true); try { localStorage.setItem(clave, '1'); } catch { /* modo privado */ } };
+  return (
+    <div className="instalar">
+      <img src="/icons/icon-192.png" alt="" />
+      <div className="que">
+        <b>{titulo}</b>
+        <p>{comoIOS ? 'En Safari tocá el botón Compartir (el cuadrado con la flecha) y elegí "Agregar a inicio".' : texto}</p>
+      </div>
+      <div className="acciones">
+        {ins.puede
+          ? <button className="btn chico" onClick={async () => { if (await ins.instalar()) cerrar(); }}>Instalar</button>
+          : !comoIOS && <button className="btn chico" onClick={() => setComoIOS(true)}>¿Cómo?</button>}
+        <button className="btn linea chico" onClick={cerrar}>{comoIOS ? 'Listo' : 'Ahora no'}</button>
+      </div>
+    </div>);
 }
 
 /* La cinta del plan: del arranque al vencimiento, con una marca por semana. */
@@ -1210,6 +1390,12 @@ function FormAlumno({ inicial, onGuardar, cerrar, conTurnos }) {
       <label>¿Cuándo arrancó el plan?<input type="date" value={f.inicio || ''} onChange={set('inicio')} /></label>
       <p className="chico" style={{ marginTop: -4 }}>El plan vence el mismo día del mes siguiente.</p>
       <div className="dos">
+        <label>Cuota mensual ($)<input type="number" inputMode="numeric" min="0" value={f.precio == null ? '' : f.precio}
+          onChange={set('precio')} placeholder="Opcional" /></label>
+        <label>Fecha de nacimiento<input type="date" value={f.nacimiento || ''} max={hoyISO()}
+          onChange={set('nacimiento')} /></label>
+      </div>
+      <div className="dos">
         <label>Peso inicial (kg)<input type="number" inputMode="decimal" value={f.peso_inicial || ''}
           onChange={set('peso_inicial')} placeholder="Opcional" /></label>
         <label>Altura (cm)<input type="number" inputMode="numeric" value={f.altura || ''}
@@ -1264,6 +1450,7 @@ function Alumnos({ clientes, recargar, abrir, recargarTurnos, alImportar, irAAyu
     ? clientes.filter(c => c.nombre.toLowerCase().includes(busq.trim().toLowerCase()))
     : clientes;
   const nuevo = { nombre: '', contacto: '', inicio: hoyISO(), peso_inicial: '', altura: '', notas: '',
+                  precio: '', nacimiento: '',
                   turnos: [{ dia_semana: 1, hora: '09:00', duracion: 60 }] };
 
   return (<div>
@@ -1555,6 +1742,109 @@ function LineaPeso({ puntos }) {
     </div>);
 }
 
+/* ---------- cobros ---------- */
+// Qué le pasa al plan con el pago, para decírselo al PT antes de confirmar.
+function efectoDelPago(cliente) {
+  const d = diasRestantes(cliente);
+  if (d === null) return 'Se le arma un plan de un mes desde hoy.';
+  if (d > 7) return 'Paga por adelantado: el plan suma un mes (hoy vence el ' + fmtLargo(cliente.vence) + ').';
+  if (d >= -7) return 'El plan se renueva un mes desde el vencimiento (' + fmtLargo(cliente.vence) + ').';
+  return 'Como venció hace más de una semana, el plan nuevo arranca hoy.';
+}
+
+// renovar = false solo anota la plata (el plan ya se renovó por otro lado).
+function ModalPago({ cliente, renovar = true, cerrar, alGuardar }) {
+  const [f, setF] = useState({ monto: cliente.precio == null ? '' : String(cliente.precio),
+                               medio: 'efectivo', fecha: hoyISO(), nota: '' });
+  const [hecho, setHecho] = useState(null);
+  const [guardando, setGuardando] = useState(false);
+  const { avisar } = usarAviso();
+  const set = k => e => setF({ ...f, [k]: e.target.value });
+
+  async function guardar() {
+    setGuardando(true);
+    try {
+      const r = await api('/clientes/' + cliente.id + '/pagos', { method: 'POST',
+        body: { ...f, monto: Number(f.monto), renovar } });
+      setHecho(r);
+      if (alGuardar) alGuardar(r);
+    } catch (e) { avisar(e.message, 'mal'); } finally { setGuardando(false); }
+  }
+
+  if (hecho) return (
+    <Modal titulo="Pago registrado" sub={cliente.nombre} cerrar={cerrar}>
+      <p className="suave" style={{ marginBottom: 16 }}>
+        Anotamos {plata(hecho.monto)}{hecho.vence ? '. El plan queda al día hasta el ' + fmtLargo(hecho.vence) : ''}.
+      </p>
+      <BotonWhatsApp clase="btn" contacto={cliente.contacto}
+        texto={MENSAJE.recibo(cliente.nombre, hecho.monto, hecho.vence)}>Mandarle el recibo por WhatsApp</BotonWhatsApp>
+      <button className="btn linea" style={{ marginTop: 10 }} onClick={cerrar}>Listo</button>
+    </Modal>);
+
+  return (
+    <Modal titulo="Registrar pago" sub={cliente.nombre} cerrar={cerrar}>
+      <div className="dos">
+        <label>Monto ($)<input type="number" inputMode="numeric" min="0" autoFocus value={f.monto}
+          onChange={set('monto')} /></label>
+        <label>Fecha<input type="date" max={hoyISO()} value={f.fecha} onChange={set('fecha')} /></label>
+      </div>
+      <label>Medio de pago
+        <select value={f.medio} onChange={set('medio')}>
+          {MEDIOS.map(([k, t]) => <option key={k} value={k}>{t}</option>)}
+        </select></label>
+      <label>Nota<input maxLength={300} value={f.nota} onChange={set('nota')} placeholder="Opcional" /></label>
+      <p className="chico" style={{ marginTop: -4, marginBottom: 14 }}>
+        {renovar ? efectoDelPago(cliente) : 'Solo se anota el pago: el plan ya quedó renovado.'}</p>
+      <button className="btn" onClick={guardar} disabled={!(Number(f.monto) > 0) || !f.fecha || guardando}>
+        {guardando ? 'Guardando...' : 'Registrar pago'}</button>
+    </Modal>);
+}
+
+function CobrosAlumno({ cliente, pagos, pagar, recargar }) {
+  const [todos, setTodos] = useState(false);
+  const { avisar, confirmar } = usarAviso();
+  const d = diasRestantes(cliente);
+
+  async function borrar(p) {
+    if (!await confirmar('¿Borramos este pago?', plata(p.monto) + ' del ' + fmt(p.fecha) +
+      '. El vencimiento del plan no cambia: si hace falta, corregilo editando al alumno.', 'Sí, borrar')) return;
+    try { await api('/pagos/' + p.id, { method: 'DELETE' }); avisar('Pago borrado'); recargar(); }
+    catch (e) { avisar(e.message, 'mal'); }
+  }
+
+  const visibles = todos ? pagos : pagos.slice(0, 4);
+  return (
+    <div className="card">
+      <div className="row">
+        <h3>Cobros</h3>
+        <button className={'btn chico' + (d !== null && d <= 7 ? '' : ' linea')} onClick={pagar}>Registrar pago</button>
+      </div>
+      <p className="suave" style={{ marginTop: 4 }}>
+        {cliente.precio != null ? 'Cuota de ' + plata(cliente.precio) + ' por mes' : 'Sin cuota cargada (podés ponerla en Editar)'}
+        {cliente.vence ? (d < 0 ? '. Debe desde el ' : '. Pagado hasta el ') + fmtLargo(cliente.vence) : ''}.
+      </p>
+      {d !== null && d <= 7 &&
+        <div style={{ marginTop: 10 }}>
+          <BotonWhatsApp contacto={cliente.contacto} texto={MENSAJE.vence(cliente)}>Recordarle el pago</BotonWhatsApp>
+        </div>}
+      {!pagos.length
+        ? <p className="chico" style={{ marginTop: 10 }}>Todavía no registraste pagos de {primerNombre(cliente.nombre)}.</p>
+        : <div style={{ marginTop: 8 }}>
+            {visibles.map(p => (
+              <div className="fila-hoy" key={p.id}>
+                <div className="quien">
+                  <b>{plata(p.monto)}</b>
+                  <span className="chico">{fmt(p.fecha)} · {nombreMedio(p.medio)}{p.nota ? ' · ' + p.nota : ''}</span>
+                </div>
+                <button className="mini" title="Borrar este pago" aria-label="Borrar este pago" onClick={() => borrar(p)}>✕</button>
+              </div>))}
+            {pagos.length > 4 &&
+              <button className="agregar-nota" onClick={() => setTodos(!todos)}>
+                {todos ? 'Ver menos' : 'Ver los ' + pagos.length + ' pagos'}</button>}
+          </div>}
+    </div>);
+}
+
 /* ---------- ficha del alumno ---------- */
 function Ficha({ id, volver, abrirRutina, abrirProgreso, clientes, plantillas, recargarPlantillas,
                  recargarTurnos, irAAyuda, perfil }) {
@@ -1572,6 +1862,8 @@ function Ficha({ id, volver, abrirRutina, abrirProgreso, clientes, plantillas, r
   const [resumen, setResumen] = useState(false);
   const [verIndic, setVerIndic] = useState(false);
   const [historial, setHistorial] = useState(null);
+  const [pagos, setPagos] = useState([]);
+  const [pagar, setPagar] = useState(false);
   const { avisar, confirmar } = usarAviso();
 
   useEffect(() => { if (verIndic) verAnteriores(); }, [verIndic]);
@@ -1580,6 +1872,7 @@ function Ficha({ id, volver, abrirRutina, abrirProgreso, clientes, plantillas, r
     try {
       setC(await api('/clientes/' + id));
       setTurnos(await api('/clientes/' + id + '/turnos'));
+      setPagos(await api('/clientes/' + id + '/pagos'));
     } catch (e) { avisar(e.message, 'mal'); }
   }, [id, avisar]);
   useEffect(() => { cargar(); }, [cargar]);
@@ -1607,18 +1900,10 @@ function Ficha({ id, volver, abrirRutina, abrirProgreso, clientes, plantillas, r
     } catch (e) { avisar(e.message, 'mal'); }
   }
 
-  // Pagó otro mes y sigue con la misma rutina: solo se renueva el plan.
-  async function renovarPlan() {
-    try {
-      const r = await api('/clientes/' + id + '/renovar-plan', { method: 'POST' });
-      avisar(r.renovado ? 'Plan renovado hasta el ' + fmtLargo(r.vence)
-        : 'Todavía no está en la semana de vencimiento (vence el ' + fmtLargo(r.vence) + ')');
-      cargar();
-    } catch (e) { avisar(e.message, 'mal'); }
-  }
-
   // Renovar: misma rutina para el mismo alumno, arrastrando lo que ya levantó.
+  // Si el plan se renueva junto con la rutina, se puede anotar el pago en el mismo paso.
   async function hacerRenovacion(conPesos) {
+    const cobrar = renovar.cobrar && Number(renovar.monto) > 0;
     try {
       const r = await api('/rutinas/' + renovar.id + '/duplicar', { method: 'POST', body: {
         cliente_id: id, con_pesos: conPesos, renovar: true,
@@ -1626,8 +1911,16 @@ function Ficha({ id, volver, abrirRutina, abrirProgreso, clientes, plantillas, r
       setRenovar(null);
       const rutinaTxt = conPesos && r.pesos_copiados
         ? `Rutina nueva con los pesos de ${r.pesos_copiados} ejercicios` : 'Rutina nueva creada';
+      let pagoTxt = '';
+      if (cobrar && r.plan && r.plan.renovado) {
+        try {
+          await api('/clientes/' + id + '/pagos', { method: 'POST',
+            body: { monto: Number(renovar.monto), medio: renovar.medio, renovar: false } });
+          pagoTxt = ' y pago de ' + plata(renovar.monto) + ' anotado';
+        } catch (e) { avisar('La rutina se renovó, pero el pago no se anotó: ' + e.message, 'mal'); }
+      }
       avisar(r.plan && r.plan.renovado
-        ? rutinaTxt + '. Plan renovado hasta el ' + fmtLargo(r.plan.vence)
+        ? rutinaTxt + '. Plan renovado hasta el ' + fmtLargo(r.plan.vence) + pagoTxt
         : rutinaTxt + (r.plan && r.plan.vence ? '. El plan sigue venciendo el ' + fmtLargo(r.plan.vence) : ''));
       abrirRutina(r.id);
     } catch (e) { avisar(e.message, 'mal'); }
@@ -1717,18 +2010,20 @@ function Ficha({ id, volver, abrirRutina, abrirProgreso, clientes, plantillas, r
         <span className="chico">
           {[c.inicio ? 'Desde el ' + fmt(c.inicio) : null,
             c.peso_inicial ? c.peso_inicial + ' kg al empezar' : null,
-            c.altura ? c.altura + ' cm' : null].filter(Boolean).join(' · ') || 'Sin medidas cargadas'}
+            c.altura ? c.altura + ' cm' : null,
+            c.nacimiento ? 'cumple el ' + fmtLargo(c.nacimiento) : null].filter(Boolean).join(' · ') || 'Sin medidas cargadas'}
         </span>
       </div>
       <button className="btn linea chico" onClick={() => setEditar({
         nombre: c.nombre, contacto: c.contacto || '', inicio: c.inicio,
-        peso_inicial: c.peso_inicial || '', altura: c.altura || '', notas: c.notas || '', id: c.id })}>Editar</button>
+        peso_inicial: c.peso_inicial || '', altura: c.altura || '', notas: c.notas || '',
+        precio: c.precio == null ? '' : c.precio, nacimiento: c.nacimiento || '', id: c.id })}>Editar</button>
     </div>
     <p className="suave">{c.contacto || 'Sin contacto cargado'}</p>
     {c.notas && <p className="suave" style={{ marginTop: 6, fontStyle: 'italic' }}>{c.notas}</p>}
     <div style={{ marginTop: 12 }}><Progreso cliente={c} /></div>
     {diasRestantes(c) !== null && diasRestantes(c) <= 7 &&
-      <button className="btn chico" style={{ marginTop: 10 }} onClick={renovarPlan}>
+      <button className="btn chico" style={{ marginTop: 10 }} onClick={() => setPagar(true)}>
         Registrar pago y renovar el plan</button>}
 
     <div className="tablero" style={{ marginTop: 16 }}>
@@ -1757,7 +2052,9 @@ function Ficha({ id, volver, abrirRutina, abrirProgreso, clientes, plantillas, r
         </div>}
     </div>
 
-    <div className="card" style={{ marginTop: 16 }}>
+    <CobrosAlumno cliente={c} pagos={pagos} pagar={() => setPagar(true)} recargar={cargar} />
+
+    <div className="card">
       <div className="row"><h3>Sus días</h3>
         <button className="btn linea chico"
           onClick={() => setTurnoForm({ dia_semana: 1, hora: '09:00', duracion: 60, nota: '' })}>Sumar día</button>
@@ -1945,6 +2242,25 @@ function Ficha({ id, volver, abrirRutina, abrirProgreso, clientes, plantillas, r
             : diasRestantes(c) <= 7 ? ' También se renueva el plan por un mes más.'
             : ' El plan no cambia: sigue venciendo el ' + fmtLargo(c.vence) + '.'}
         </p>
+        {(diasRestantes(c) === null || diasRestantes(c) <= 7) && (<div>
+          <label>¿Ya te pagó el mes?
+            <select value={renovar.cobrar ? 'si' : 'no'}
+              onChange={e => setRenovar({ ...renovar, cobrar: e.target.value === 'si',
+                monto: renovar.monto == null ? (c.precio == null ? '' : String(c.precio)) : renovar.monto,
+                medio: renovar.medio || 'efectivo' })}>
+              <option value="no">Todavía no</option>
+              <option value="si">Sí, anotar el pago</option>
+            </select></label>
+          {renovar.cobrar &&
+            <div className="dos">
+              <label>Monto ($)<input type="number" inputMode="numeric" min="0" value={renovar.monto}
+                onChange={e => setRenovar({ ...renovar, monto: e.target.value })} /></label>
+              <label>Medio
+                <select value={renovar.medio} onChange={e => setRenovar({ ...renovar, medio: e.target.value })}>
+                  {MEDIOS.map(([k, t]) => <option key={k} value={k}>{t}</option>)}
+                </select></label>
+            </div>}
+        </div>)}
         <button className="btn" onClick={() => hacerRenovacion(true)}>Renovar con sus pesos</button>
         <button className="btn linea" style={{ marginTop: 10 }} onClick={() => hacerRenovacion(false)}>
           Renovar en blanco</button>
@@ -1975,6 +2291,8 @@ function Ficha({ id, volver, abrirRutina, abrirProgreso, clientes, plantillas, r
       </Modal>}
 
     {tope && <Tope texto={tope} cerrar={() => setTope(null)} irAAyuda={irAAyuda} />}
+
+    {pagar && <ModalPago cliente={c} cerrar={() => setPagar(false)} alGuardar={() => cargar()} />}
 
     {usarPlantilla &&
       <Modal titulo="Tus plantillas" sub="Se crea una rutina nueva para este alumno." cerrar={() => setUsarPlantilla(false)}>
@@ -3116,6 +3434,7 @@ function Ayuda({ perfil, recargarPerfil }) {
       hoja('Agenda', (d.turnos || []).map(t => ({ ...t, dia: DIAS[t.dia_semana] })));
       hoja('Registros', d.registros);
       hoja('Peso corporal', d.seguimiento);
+      hoja('Pagos', d.pagos);
       if (!libro.SheetNames.length) { avisar('Todavía no hay datos para exportar', 'mal'); return; }
       XLSX.writeFile(libro, 'smarttrainner-' + d.generado.slice(0, 10) + '.xlsx');
       avisar('Listo, se descargó tu archivo');
@@ -3184,6 +3503,7 @@ function Ayuda({ perfil, recargarPerfil }) {
           <li><b>25 plantillas</b> de rutina para reutilizar, en vez de una</li>
           <li><b>600 ejercicios</b> en tu banco, en vez de 25</li>
           <li><b>Tu marca</b>: tu logo, tu color y tu nombre en la rutina de cada alumno</li>
+          <li><b>Reportes del negocio</b>: ingresos de 12 meses, altas y bajas, asistencia y horarios más pedidos</li>
         </ul>
         <button className="btn" onClick={() => { setTipo('pregunta');
           setTexto('Quiero pasar al plan completo.');
@@ -3202,7 +3522,7 @@ function Ayuda({ perfil, recargarPerfil }) {
           {bajando ? 'Preparando...' : 'Bajar todo en Excel'}</button>
       </div>
       <p className="suave" style={{ marginTop: 6 }}>
-        Un archivo con tus alumnos, ejercicios, rutinas, agenda y todo lo que registraron. Es tuyo, llevátelo cuando quieras.
+        Un archivo con tus alumnos, ejercicios, rutinas, agenda, pagos y todo lo que registraron. Es tuyo, llevátelo cuando quieras.
       </p>
     </div>
 
@@ -3595,22 +3915,30 @@ function VistaAlumno({ token }) {
     document.title = n ? n + ' · SmartTrainner' : 'SmartTrainner';
   }, [d && d.marca && d.marca.nombre]);
 
+  // Sin señal, la app instalada muestra la última rutina guardada (ver public/sw.js).
+  const [sinConexion, setSinConexion] = useState(false);
+
   const cargar = useCallback(() => {
     fetch('/api/alumno/' + token + (semana ? '?semana=' + semana : ''))
-      .then(r => r.json())
+      .then(r => { setSinConexion(r.headers.get('X-Sin-Conexion') === '1'); return r.json(); })
       .then(x => {
         if (x.error) { setError(x.error); return; }
         setD(x);
         if (x.indicacion && !x.indicacion.leida) setVerIndicacion(true);
         if (x.peso_hoy) setPeso(String(x.peso_hoy));
       })
-      .catch(() => setError('No pudimos cargar tu rutina.'));
+      .catch(() => setError('No pudimos cargar tu rutina. Revisá tu conexión y probá de nuevo.'));
   }, [token, semana]);
   useEffect(cargar, [cargar]);
 
   async function pedir(ruta, opciones = {}) {
-    const r = await fetch('/api/alumno/' + token + ruta, Object.assign(
-      { headers: { 'Content-Type': 'application/json' } }, opciones));
+    let r;
+    try {
+      r = await fetch('/api/alumno/' + token + ruta, Object.assign(
+        { headers: { 'Content-Type': 'application/json' } }, opciones));
+    } catch {
+      throw new Error('Sin conexión: no se guardó. Probá de nuevo cuando tengas señal.');
+    }
     const datos = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(datos.error || 'No pudimos guardarlo. Probá de nuevo.');
     return datos;
@@ -3673,8 +4001,15 @@ function VistaAlumno({ token }) {
           <div className="derecha"><BotonTema /></div></div></div>
       : <div className="topbar"><div className="brand"><h1>SmartTrainner</h1><span className="hola">tu rutina</span>
           <div className="derecha"><BotonTema /></div></div></div>}
+    {sinConexion &&
+      <div className="sin-conexion" role="status">Sin conexión: estás viendo la última versión guardada de tu rutina.</div>}
     <div className="wrap angosto">
       <h2>Hola, {(d.nombre || '').split(' ')[0]}</h2>
+
+      <div style={{ marginTop: 12 }}>
+        <AvisoInstalar clave={'st_instalar_' + token} titulo="Tené tu rutina a mano"
+          texto="Instalala en tu celular: se abre con un toque y la ves aunque no tengas señal." />
+      </div>
 
       {d.dias_para_vencer !== null && d.dias_para_vencer !== undefined && d.dias_para_vencer <= 3 &&
         <div className="recordatorio" role="alert">
@@ -3766,6 +4101,391 @@ function VistaAlumno({ token }) {
   </div>);
 }
 
+/* ---------- pantalla Hoy ----------
+   Lo primero que ve el PT: quién viene hoy, a quién cobrarle, a quién
+   escribirle. Todo se resuelve desde acá con un toque. */
+// El nombre del alumno, que lleva a su ficha.
+const EnlaceAlumno = ({ abrir, id, children }) => (
+  <button onClick={() => abrir(id)} title="Abrir su ficha">{children}</button>);
+const cuantos = (n, uno, varios) => n + ' ' + (n === 1 ? uno : varios);
+const fechaLarga = f => { const d = new Date(f + 'T00:00:00');
+  return DIAS[d.getDay()].toLowerCase() + ' ' + d.getDate() + ' de ' + MESES[d.getMonth()]; };
+const cuandoVence = dias => dias < 0 ? 'venció hace ' + cuantos(-dias, 'día', 'días')
+  : dias === 0 ? 'vence hoy' : dias === 1 ? 'vence mañana' : 'vence en ' + dias + ' días';
+
+function Hoy({ perfil, abrirAlumno, irA }) {
+  const [d, setD] = useState(null);
+  const [pagar, setPagar] = useState(null);
+  const { avisar } = usarAviso();
+
+  const cargar = useCallback(async () => {
+    try { setD(await api('/hoy')); } catch (e) { avisar(e.message, 'mal'); }
+  }, [avisar]);
+  useEffect(() => { cargar(); }, [cargar]);
+
+  // Un toque marca presente, otro ausente, otro lo deja sin marcar (igual que en la agenda).
+  async function marcar(t, estado) {
+    const nuevo = t.asistencia === estado ? null : estado;
+    setD(prev => ({ ...prev, turnos_hoy: prev.turnos_hoy.map(x =>
+      x.cliente_id === t.cliente_id ? { ...x, asistencia: nuevo } : x) }));
+    try { await api('/asistencias', { method: 'POST', body: { cliente_id: t.cliente_id, fecha: d.fecha, estado: nuevo } }); }
+    catch (e) { avisar(e.message, 'mal'); cargar(); }
+  }
+
+  if (!d) return <p className="suave">Cargando...</p>;
+  const nombre = (perfil && primerNombre(perfil.nombre)) || '';
+
+  return (<div>
+    <div className="saludo">
+      <h2>{nombre ? 'Hola, ' + nombre : 'Hoy'}</h2>
+      <p>Hoy es {fechaLarga(d.fecha)}.</p>
+    </div>
+
+    <AvisoInstalar clave="st_instalar_pt" titulo="Tené SmartTrainner a mano"
+      texto="Instalala en tu celular y abrila como una app, sin buscar el link." />
+
+    {!d.alumnos
+      ? <div className="vacio"><p>Todavía no tenés alumnos. Cuando los sumes, acá vas a ver tu día.</p>
+          <button className="btn chico" onClick={() => irA('alumnos')}>Sumar alumnos</button></div>
+      : (<div>
+      <div className="tablero">
+        <div className="dato-grande">
+          <b className="cifra-dato">{d.turnos_hoy.length}</b>
+          <span className="etiqueta-dato">{d.turnos_hoy.length === 1 ? 'Turno hoy' : 'Turnos hoy'}</span>
+          <span className="chico">{d.turnos_manana.length} mañana</span>
+        </div>
+        <div className="dato-grande">
+          <b className="cifra-dato">{d.vencen.length}</b>
+          <span className="etiqueta-dato">Para cobrar</span>
+          <span className="chico">vencidos o esta semana</span>
+        </div>
+        <div className="dato-grande">
+          <b className="cifra-dato" style={{ fontSize: 23 }}>{plata(d.caja.cobrado)}</b>
+          <span className="etiqueta-dato">Cobrado en {MESES[Number(d.caja.mes.slice(5, 7)) - 1]}</span>
+          <span className="chico">{cuantos(d.caja.pagos, 'pago', 'pagos')}</span>
+        </div>
+      </div>
+
+      <div className="card bloque-hoy">
+        <div className="row">
+          <h3>Turnos de hoy{!!d.turnos_hoy.length && <span className="cuenta">{d.turnos_hoy.length}</span>}</h3>
+          <button className="btn linea chico" onClick={() => irA('agenda')}>Agenda</button>
+        </div>
+        {!d.turnos_hoy.length && <p className="todo-ok">Hoy no tenés turnos en la agenda.</p>}
+        {d.turnos_hoy.map(t => (
+          <div className="fila-hoy" key={t.id}>
+            <div className="horario">{t.hora}</div>
+            <div className="quien">
+              <EnlaceAlumno abrir={abrirAlumno} id={t.cliente_id}><b>{t.alumno}</b></EnlaceAlumno>
+              <span className="chico">{t.duracion} min{t.nota ? ' · ' + t.nota : ''}</span>
+              {t.choca && <span className="globo alerta" style={{ marginLeft: 6 }}>se pisa</span>}
+            </div>
+            <div className="acciones">
+              <button className={'asist' + (t.asistencia === 'presente' ? ' vino' : '')}
+                onClick={() => marcar(t, 'presente')}>Vino</button>
+              <button className={'asist' + (t.asistencia === 'ausente' ? ' falto' : '')}
+                onClick={() => marcar(t, 'ausente')}>Faltó</button>
+            </div>
+          </div>))}
+      </div>
+
+      <div className="card bloque-hoy">
+        <div className="row">
+          <h3>Cobros{!!d.vencen.length && <span className="cuenta">{d.vencen.length}</span>}</h3>
+          <button className="btn linea chico" onClick={() => irA('negocio')}>Negocio</button>
+        </div>
+        {!d.vencen.length && <p className="todo-ok">Nadie vence esta semana. Todo al día.</p>}
+        {d.vencen.map(c => (
+          <div className="fila-hoy" key={c.id}>
+            <div className="quien">
+              <EnlaceAlumno abrir={abrirAlumno} id={c.id}><b>{c.nombre}</b></EnlaceAlumno>
+              <span className={'chico'} style={c.dias < 0 ? { color: 'var(--carmin)' } : null}>
+                {cuandoVence(c.dias)}{c.precio != null ? ' · ' + plata(c.precio) : ''}</span>
+            </div>
+            <div className="acciones">
+              <BotonWhatsApp contacto={c.contacto} texto={MENSAJE.vence(c)}>Recordar</BotonWhatsApp>
+              <button className="btn chico" onClick={() => setPagar(c)}>Cobrar</button>
+            </div>
+          </div>))}
+      </div>
+
+      {!!d.turnos_manana.length &&
+        <div className="card bloque-hoy">
+          <div className="row"><h3>Mañana<span className="cuenta">{d.turnos_manana.length}</span></h3></div>
+          <p className="chico" style={{ marginBottom: 4 }}>Mandales un recordatorio para que no se olviden.</p>
+          {d.turnos_manana.map(t => (
+            <div className="fila-hoy" key={t.id}>
+              <div className="horario">{t.hora}</div>
+              <div className="quien"><EnlaceAlumno abrir={abrirAlumno} id={t.cliente_id}><b>{t.alumno}</b></EnlaceAlumno></div>
+              <div className="acciones">
+                <BotonWhatsApp contacto={t.contacto} texto={MENSAJE.turno(t.alumno, t.hora, 'mañana')}>Recordar turno</BotonWhatsApp>
+              </div>
+            </div>))}
+        </div>}
+
+      {!!d.inactivos.length &&
+        <div className="card bloque-hoy">
+          <div className="row"><h3>Hace días que no entrenan<span className="cuenta">{d.inactivos.length}</span></h3></div>
+          <p className="chico" style={{ marginBottom: 4 }}>No anotaron series ni vinieron en la última semana.</p>
+          {d.inactivos.map(c => (
+            <div className="fila-hoy" key={c.id}>
+              <div className="quien">
+                <EnlaceAlumno abrir={abrirAlumno} id={c.id}><b>{c.nombre}</b></EnlaceAlumno>
+                <span className="chico">{c.ultima ? 'La última vez fue hace ' + c.dias + ' días'
+                  : 'Tiene rutina hace ' + c.dias + ' días y todavía no anotó nada'}</span>
+              </div>
+              <div className="acciones">
+                <BotonWhatsApp contacto={c.contacto} texto={MENSAJE.inactivo(c.nombre, c.dias)}>Escribirle</BotonWhatsApp>
+              </div>
+            </div>))}
+        </div>}
+
+      {!!d.cumples.length &&
+        <div className="card bloque-hoy">
+          <div className="row"><h3>Cumpleaños</h3></div>
+          {d.cumples.map(c => (
+            <div className="fila-hoy" key={c.id}>
+              <div className="quien">
+                <EnlaceAlumno abrir={abrirAlumno} id={c.id}><b>{c.nombre}</b></EnlaceAlumno>
+                <span className="chico">{c.dias === 0 ? 'Hoy cumple ' + c.cumple + ' 🎉'
+                  : c.dias === 1 ? 'Mañana cumple ' + c.cumple : 'Cumple ' + c.cumple + ' el ' + fmtLargo(c.fecha)}</span>
+              </div>
+              {c.dias === 0 &&
+                <div className="acciones">
+                  <BotonWhatsApp principal contacto={c.contacto} texto={MENSAJE.cumple(c.nombre)}>Saludar</BotonWhatsApp>
+                </div>}
+            </div>))}
+        </div>}
+
+      {!!d.observaciones.length &&
+        <div className="card bloque-hoy">
+          <div className="row"><h3>Lo que te escribieron<span className="cuenta">{d.observaciones.length}</span></h3></div>
+          <p className="chico" style={{ marginBottom: 4 }}>Observaciones de tus alumnos en los últimos días.</p>
+          {d.observaciones.map(o => (
+            <div className="fila-hoy" key={o.id}>
+              <div className="quien">
+                <EnlaceAlumno abrir={abrirAlumno} id={o.cliente_id}><b>{o.alumno}</b></EnlaceAlumno>
+                <span className="chico">{(o.ejercicio || 'Ejercicio') + ' · ' + fmt(o.fecha)}</span>
+                <p style={{ marginTop: 2 }}>{o.texto}</p>
+              </div>
+            </div>))}
+        </div>}
+    </div>)}
+
+    {pagar && <ModalPago cliente={pagar} cerrar={() => setPagar(null)} alGuardar={() => cargar()} />}
+  </div>);
+}
+
+/* ---------- negocio: cobros del mes y reportes ---------- */
+function Negocio({ abrirAlumno, irAAyuda }) {
+  const esteMes = hoyISO().slice(0, 7);
+  const [mes, setMes] = useState(esteMes);
+  const [d, setD] = useState(null);
+  const [pagar, setPagar] = useState(null);
+  const [todos, setTodos] = useState(false);
+  const { avisar } = usarAviso();
+
+  const cargar = useCallback(async () => {
+    try { setD(await api('/negocio?mes=' + mes)); } catch (e) { avisar(e.message, 'mal'); }
+  }, [mes, avisar]);
+  useEffect(() => { setD(null); setTodos(false); cargar(); }, [cargar]);
+
+  const actual = mes === esteMes;
+  const filaCobro = c => (
+    <div className="fila-hoy" key={c.id}>
+      <div className="quien">
+        <EnlaceAlumno abrir={abrirAlumno} id={c.id}><b>{c.nombre}</b></EnlaceAlumno>
+        <span className="chico" style={c.vence < hoyISO() ? { color: 'var(--carmin)' } : null}>
+          {cuandoVence(diasEntre(hoyISO(), c.vence))}{c.precio != null ? ' · ' + plata(c.precio) : ' · sin cuota cargada'}</span>
+      </div>
+      <div className="acciones">
+        <BotonWhatsApp contacto={c.contacto} texto={MENSAJE.vence(c)}>Recordar</BotonWhatsApp>
+        <button className="btn chico" onClick={() => setPagar(c)}>Cobrar</button>
+      </div>
+    </div>);
+
+  return (<div>
+    <div className="row" style={{ marginBottom: 12 }}><h2>Tu negocio</h2></div>
+    <div className="navmes">
+      <button className="mini" onClick={() => setMes(moverMes(mes, -1))} title="Mes anterior">‹</button>
+      <b>{nombreMes(mes).replace(/^./, x => x.toUpperCase())}</b>
+      <button className="mini" onClick={() => setMes(moverMes(mes, 1))} disabled={actual} title="Mes siguiente">›</button>
+    </div>
+
+    {!d ? <p className="suave">Cargando...</p> : (<div>
+      <div className="tablero">
+        <div className="dato-grande">
+          <b className="cifra-dato" style={{ fontSize: 23 }}>{plata(d.caja.cobrado)}</b>
+          <span className="etiqueta-dato">Cobrado</span>
+          <span className="chico">{cuantos(d.caja.pagos, 'pago', 'pagos')}</span>
+        </div>
+        {actual &&
+          <div className="dato-grande">
+            <b className="cifra-dato" style={{ fontSize: 23 }}>{plata(d.caja.a_cobrar)}</b>
+            <span className="etiqueta-dato">Por cobrar</span>
+            <span className="chico">{cuantos(d.deudores.length + d.proximos.length, 'alumno', 'alumnos')}
+              {d.caja.sin_precio ? ', ' + d.caja.sin_precio + ' sin cuota' : ''}</span>
+          </div>}
+        <div className="dato-grande">
+          <b className="cifra-dato" style={{ fontSize: 23 }}>{plata(d.caja.ticket)}</b>
+          <span className="etiqueta-dato">Pago promedio</span>
+          <span className="chico">en el mes</span>
+        </div>
+      </div>
+
+      {actual && !!d.deudores.length &&
+        <div className="card bloque-hoy">
+          <div className="row"><h3>Deben<span className="cuenta">{d.deudores.length}</span></h3></div>
+          <p className="chico" style={{ marginBottom: 4 }}>El plan les venció y no registraste el pago.</p>
+          {d.deudores.map(filaCobro)}
+        </div>}
+
+      {actual && !!d.proximos.length &&
+        <div className="card bloque-hoy">
+          <div className="row"><h3>Vencen este mes<span className="cuenta">{d.proximos.length}</span></h3></div>
+          {d.proximos.map(filaCobro)}
+        </div>}
+
+      <div className="card">
+        <h3>Pagos de {nombreMes(mes)}</h3>
+        {!d.pagos.length && <p className="todo-ok" style={{ marginTop: 6 }}>
+          {actual ? 'Todavía no registraste pagos este mes. Se cargan desde la ficha del alumno o con "Cobrar".'
+            : 'No hay pagos registrados en este mes.'}</p>}
+        {!!d.caja.por_medio.length && d.caja.por_medio.length > 1 &&
+          <div style={{ margin: '10px 0 6px' }}>
+            {d.caja.por_medio.map(m => (
+              <div key={m.medio}>
+                <div className="row"><span className="chico">{nombreMedio(m.medio)} ({m.n})</span>
+                  <span className="monto">{plata(m.total)}</span></div>
+                <div className="barra-medio"><i style={{ width: (m.total / (d.caja.cobrado || 1)) * 100 + '%' }} /></div>
+              </div>))}
+          </div>}
+        {(todos ? d.pagos : d.pagos.slice(0, 8)).map(p => (
+          <div className="fila-hoy" key={p.id}>
+            <div className="quien">
+              <EnlaceAlumno abrir={abrirAlumno} id={p.cliente_id}><b>{p.alumno}</b></EnlaceAlumno>
+              <span className="chico">{fmt(p.fecha)} · {nombreMedio(p.medio)}{p.nota ? ' · ' + p.nota : ''}</span>
+            </div>
+            <span className="monto">{plata(p.monto)}</span>
+          </div>))}
+        {d.pagos.length > 8 &&
+          <button className="agregar-nota" onClick={() => setTodos(!todos)}>
+            {todos ? 'Ver menos' : 'Ver los ' + d.pagos.length + ' pagos'}</button>}
+      </div>
+
+      {d.reportes_bloqueados &&
+        <div className="card bloqueado">
+          <h3>Reportes del negocio</h3>
+          <p className="suave" style={{ margin: '6px 0 14px' }}>
+            Con el plan completo ves tus ingresos de los últimos 12 meses, cuántos alumnos entran y se van,
+            la asistencia del mes y tus horarios más pedidos.</p>
+          <button className="btn chico" onClick={irAAyuda}>Ver el plan completo</button>
+        </div>}
+
+      {d.reportes && <Reportes r={d.reportes} mes={mes} />}
+    </div>)}
+
+    {pagar && <ModalPago cliente={pagar} cerrar={() => setPagar(null)} alGuardar={() => cargar()} />}
+  </div>);
+}
+
+function Reportes({ r, mes }) {
+  const maxIngreso = Math.max(1, ...r.ingresos.map(x => x.total));
+  const anual = r.ingresos.reduce((s, x) => s + x.total, 0);
+  const conIngresos = r.ingresos.filter(x => x.total > 0);
+  const maxDia = Math.max(1, ...r.por_dia);
+  const a = r.alumnos;
+  const ordenSemana = [1, 2, 3, 4, 5, 6, 0];
+
+  return (<div>
+    <h2 style={{ margin: '24px 0 12px' }}>Reportes</h2>
+
+    <div className="card">
+      <div className="row"><h3>Ingresos</h3><span className="chico">últimos 12 meses</span></div>
+      <div className="barras ingresos" role="img"
+        aria-label={'Ingresos por mes: ' + r.ingresos.map(x => nombreMes(x.mes) + ' ' + plata(x.total)).join(', ')}>
+        {r.ingresos.map(x => (
+          <div className="barra-col" key={x.mes} title={nombreMes(x.mes) + ': ' + plata(x.total)}>
+            <div className={'col' + (x.mes === mes ? ' actual' : '')}
+              style={{ height: Math.max(3, (x.total / maxIngreso) * 110) + 'px' }} />
+            <span className="chico">{mesCorto(x.mes)}</span>
+          </div>))}
+      </div>
+      <p className="suave" style={{ marginTop: 10 }}>
+        {anual ? <>En 12 meses cobraste <b className="monto">{plata(anual)}</b>
+          {conIngresos.length > 1 ? ', un promedio de ' + plata(anual / conIngresos.length) + ' en los meses con cobros' : ''}.</>
+          : 'Cuando registres pagos, acá vas a ver cómo vienen tus ingresos mes a mes.'}
+      </p>
+    </div>
+
+    <div className="tablero">
+      <div className="dato-grande">
+        <b className="cifra-dato">{a.activos}</b>
+        <span className="etiqueta-dato">Alumnos activos</span>
+        <span className="chico">hoy</span>
+      </div>
+      <div className="dato-grande">
+        <b className="cifra-dato">+{a.altas}<span style={{ fontSize: 20, color: 'var(--gris)' }}> / −{a.bajas}</span></b>
+        <span className="etiqueta-dato">Altas y bajas</span>
+        <span className="chico">en el mes</span>
+      </div>
+      <div className="dato-grande">
+        <b className="cifra-dato">{a.retencion == null ? '—' : a.retencion + '%'}</b>
+        <span className="etiqueta-dato">Retención</span>
+        <span className="chico">{a.al_inicio ? 'de ' + a.al_inicio + ' que había al empezar el mes' : 'sin datos del mes'}</span>
+      </div>
+      <div className="dato-grande">
+        <b className="cifra-dato">{r.asistencia.porcentaje == null ? '—' : r.asistencia.porcentaje + '%'}</b>
+        <span className="etiqueta-dato">Asistencia</span>
+        <span className="chico">{r.asistencia.presente + r.asistencia.ausente
+          ? r.asistencia.presente + ' de ' + (r.asistencia.presente + r.asistencia.ausente) + ' turnos marcados'
+          : 'no marcaste asistencias'}</span>
+      </div>
+    </div>
+
+    <div className="card">
+      <h3>Movimiento de alumnos</h3>
+      <table className="tabla">
+        <thead><tr><th>Mes</th><th>Altas</th><th>Bajas</th><th>Saldo</th></tr></thead>
+        <tbody>
+          {r.movimiento.map(m => (
+            <tr key={m.mes}>
+              <td>{nombreMes(m.mes)}</td><td><b>{m.altas}</b></td><td><b>{m.bajas}</b></td>
+              <td><b>{m.altas - m.bajas > 0 ? '+' : ''}{m.altas - m.bajas}</b></td>
+            </tr>))}
+        </tbody>
+      </table>
+      <p className="chico" style={{ marginTop: 8 }}>
+        En el mes, {cuantos(r.entrenamiento.alumnos, 'alumno anotó', 'alumnos anotaron')} sus series,
+        en {cuantos(r.entrenamiento.sesiones, 'sesión', 'sesiones')} de entrenamiento.</p>
+    </div>
+
+    <div className="card">
+      <h3>Horarios más pedidos</h3>
+      {!r.horarios.length
+        ? <p className="suave" style={{ marginTop: 6 }}>Cargá los días y horarios de tus alumnos en la agenda para ver esto.</p>
+        : (<div>
+            {r.horarios.map(h => (
+              <div className="fila-hoy" key={h.dia_semana + h.hora}>
+                <div className="quien"><b>{DIAS[h.dia_semana]} {h.hora}</b></div>
+                <span className={'globo ' + (h.alumnos > r.capacidad ? 'alerta' : h.alumnos === r.capacidad ? 'aviso' : '')}>
+                  {cuantos(h.alumnos, 'alumno', 'alumnos')}{h.alumnos >= r.capacidad ? ' · lleno' : ''}</span>
+              </div>))}
+            <div className="barras" style={{ height: 90 }} role="img"
+              aria-label={'Alumnos por día: ' + ordenSemana.map(x => DIAS[x] + ' ' + r.por_dia[x]).join(', ')}>
+              {ordenSemana.map(x => (
+                <div className="barra-col" key={x} title={DIAS[x] + ': ' + r.por_dia[x]}>
+                  <div className="col" style={{ height: Math.max(3, (r.por_dia[x] / maxDia) * 60) + 'px' }} />
+                  <span className="chico">{DIAS[x].slice(0, 2)}</span>
+                </div>))}
+            </div>
+            <p className="chico" style={{ marginTop: 6 }}>
+              Turnos por día de la semana. "Lleno" es según los alumnos que atendés a la vez ({r.capacidad}).</p>
+          </div>)}
+    </div>
+  </div>);
+}
+
 /* ---------- app ---------- */
 function App() {
   const ruta = location.pathname.match(/^\/r\/([A-Za-z0-9]+)/);
@@ -3776,7 +4496,7 @@ function App() {
   // null = todavía no sabemos si hay sesión (se pregunta al servidor al abrir).
   const [entrado, setEntrado] = useState(null);
   const [perfil, setPerfil] = useState(null);
-  const [tab, setTab] = useState('alumnos');
+  const [tab, setTab] = useState('hoy');
   const [clientes, setClientes] = useState([]);
   const [ejercicios, setEjercicios] = useState([]);
   const [grupos, setGrupos] = useState([]);
@@ -3836,8 +4556,8 @@ function App() {
   if (perfil && perfil.plan === 'pausado') return <Pausada perfil={perfil} salir={salir} />;
 
   const esAdmin = perfil && perfil.rol === 'admin';
-  const tabs = [['alumnos', 'Alumnos'], ['agenda', 'Agenda'], ['ejercicios', 'Ejercicios'],
-                ['plantillas', 'Plantillas'], ['ayuda', 'Ayuda']];
+  const tabs = [['hoy', 'Hoy'], ['alumnos', 'Alumnos'], ['agenda', 'Agenda'], ['negocio', 'Negocio'],
+                ['ejercicios', 'Ejercicios'], ['plantillas', 'Plantillas'], ['ayuda', 'Ayuda']];
   if (esAdmin) tabs.push(['admin', 'Cuentas'], ['consultas', 'Consultas'], ['metricas', 'Métricas']);
 
   // Al cambiar de pestaña se refrescan los datos que esa vista necesita.
@@ -3848,13 +4568,19 @@ function App() {
     if (k === 'plantillas') recargarPlantillas();
     if (k === 'ayuda') recargarPerfil();
   }
+  // Desde Hoy o Negocio se salta a la ficha del alumno (y "volver" lleva a la lista).
+  function abrirAlumno(id) {
+    setRutinaId(null); setProgresoId(null); setTab('alumnos'); setClienteId(id);
+  }
 
   // Las listas aprovechan el ancho; las pantallas de detalle no.
   const anchoCompleto = !clienteId && !rutinaId && !progresoId &&
     ['alumnos', 'ejercicios', 'plantillas', 'admin'].includes(tab);
 
   let contenido;
-  if (tab === 'metricas' && esAdmin) contenido = <Metricas />;
+  if (tab === 'hoy') contenido = <Hoy perfil={perfil} abrirAlumno={abrirAlumno} irA={irA} />;
+  else if (tab === 'negocio') contenido = <Negocio abrirAlumno={abrirAlumno} irAAyuda={() => irA('ayuda')} />;
+  else if (tab === 'metricas' && esAdmin) contenido = <Metricas />;
   else if (tab === 'consultas' && esAdmin) contenido = <Consultas />;
   else if (tab === 'ayuda') contenido = perfil
     ? <Ayuda perfil={perfil} recargarPerfil={recargarPerfil} /> : <p className="suave">Cargando...</p>;
@@ -3884,8 +4610,8 @@ function App() {
     recargarTurnos={recargarTurnos} irAAyuda={() => irA('ayuda')}
     alImportar={async () => { await recargarEjercicios(); await recargarPlantillas(); }} />;
 
-  // En el celular entran cinco accesos abajo. Si la cuenta es admin y hay más,
-  // los últimos se agrupan en "Más" para que ninguno quede escondido.
+  // En el celular entran cinco accesos abajo: los cuatro de todos los días
+  // (Hoy, Alumnos, Agenda, Negocio) y el resto agrupado en "Más".
   const principales = tabs.length > 5 ? tabs.slice(0, 4) : tabs;
   const restantes = tabs.slice(principales.length);
 
