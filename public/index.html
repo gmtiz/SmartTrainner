@@ -628,6 +628,59 @@
   .barra-medio i{display:block;height:100%;background:var(--acento);border-radius:99px}
   .bloqueado{border-style:dashed}
 
+  /* ---------- prescripción y superseries ---------- */
+  .prescripcion{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}
+  .prescripcion span{
+    font-family:var(--tit),sans-serif;font-size:12px;font-weight:600;color:var(--gris);
+    border:1px solid var(--borde);border-radius:6px;padding:1px 7px;white-space:nowrap;
+  }
+  .etiqueta-bloque{
+    display:inline-block;font-family:var(--tit),sans-serif;font-size:11.5px;font-weight:800;
+    background:var(--acento);color:var(--sobre-acento);border-radius:5px;padding:1px 6px;margin-right:6px;
+    vertical-align:2px;
+  }
+  .cabeza-bloque{
+    margin-top:12px;padding:8px 12px;background:var(--suave);color:var(--acento-texto);
+    border-radius:var(--r-chico);font-size:13.5px;font-weight:600;
+  }
+  .ej.en-bloque{border-left:3px solid var(--acento);padding-left:12px}
+
+  /* ---------- modo entrenando ---------- */
+  .entreno-cab{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+  .entreno-cab .que{flex:1;min-width:0}
+  .entreno-cab .que b{font-family:var(--tit),sans-serif;font-size:17px;display:block}
+  .pasos{display:flex;gap:4px;margin-bottom:14px}
+  .pasos i{flex:1;height:5px;border-radius:99px;background:var(--borde)}
+  .pasos i.hecho{background:var(--acento)}
+  .pasos i.ahora{background:var(--acento-hover)}
+  .entreno .dia{padding-top:6px}
+  .entreno .ej{border-top:0}
+  .entreno .ej-top b{font-size:20px;font-family:var(--tit),sans-serif}
+  .entreno-nav{display:flex;gap:8px;margin-top:4px}
+  .entreno-nav .btn{flex:1}
+  .reloj{
+    position:fixed;left:0;right:0;bottom:0;z-index:45;background:var(--nav);border-top:1px solid var(--nav-linea);
+    box-shadow:var(--som-alta);padding:12px 16px calc(12px + env(safe-area-inset-bottom));
+  }
+  .reloj .adentro{max-width:780px;margin:0 auto;display:flex;align-items:center;gap:12px}
+  .reloj .tiempo{
+    font-family:var(--tit),sans-serif;font-size:34px;font-weight:800;letter-spacing:-.03em;
+    font-variant-numeric:tabular-nums;color:var(--acento);min-width:96px;
+  }
+  .reloj .tiempo.listo{color:var(--verde)}
+  .reloj .que{flex:1;min-width:0;font-size:13.5px;color:var(--gris)}
+  .reloj .que b{display:block;color:var(--tinta);font-family:var(--tit),sans-serif;font-size:15px}
+  .reloj .cinta{margin-top:6px}
+  /* Con el temporizador abajo, los avisos suben para no taparlo. */
+  body:has(.reloj) .mensajes{bottom:calc(100px + env(safe-area-inset-bottom)) !important}
+  .esfuerzo{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:6px 0 14px}
+  .esfuerzo button{
+    border:1.5px solid var(--borde);background:var(--hoja);border-radius:var(--r-chico);padding:10px 0;
+    font-family:var(--tit),sans-serif;font-size:16px;font-weight:800;color:var(--tinta);cursor:pointer;
+  }
+  .esfuerzo button.on{background:var(--acento);border-color:var(--acento);color:var(--sobre-acento)}
+  .terminado{display:flex;align-items:center;gap:8px;margin-top:6px}
+
   /* ---------- app instalable y sin conexión ---------- */
   .instalar{
     display:flex;gap:12px;align-items:center;background:var(--hoja);border:1px solid var(--borde);
@@ -905,6 +958,69 @@ function AvisoInstalar({ titulo, texto, clave }) {
       </div>
     </div>);
 }
+
+/* ---------- prescripción de cada ejercicio ----------
+   Descanso (en segundos), intensidad ("RPE 8", "RIR 2", "70%"), tempo ("3-1-1-0")
+   y bloque de superserie: los ejercicios con la misma letra se hacen seguidos. */
+const reloj = s => Math.floor(s / 60) + ':' + String(Math.max(0, s) % 60).padStart(2, '0');
+const fmtDescanso = s => s == null ? '' : s < 60 ? s + ' s' : (s % 60 ? reloj(s) : s / 60) + ' min';
+const DESCANSOS = [30, 45, 60, 75, 90, 120, 150, 180, 240, 300];
+const DESCANSO_SIN_DATO = 90;   // el temporizador del alumno usa esto si el profe no cargó pausa
+
+// "A1", "A2"... para los ejercicios de cada superserie, en el orden del día.
+function etiquetasBloque(items) {
+  const cuenta = {}, r = {};
+  (items || []).forEach(it => {
+    if (!it.bloque) return;
+    cuenta[it.bloque] = (cuenta[it.bloque] || 0) + 1;
+    r[it.id] = it.bloque + cuenta[it.bloque];
+  });
+  return r;
+}
+const detallesPrescripcion = it => [
+  it.descanso != null ? 'Pausa ' + fmtDescanso(it.descanso) : null,
+  it.intensidad || null,
+  it.tempo ? 'Tempo ' + it.tempo : null
+].filter(Boolean);
+
+function Prescripcion({ item }) {
+  const d = detallesPrescripcion(item);
+  if (!d.length) return null;
+  return <div className="prescripcion">{d.map(t => <span key={t}>{t}</span>)}</div>;
+}
+
+// Los campos del formulario de un ejercicio (rutina o plantilla).
+function CamposPrescripcion({ form, setForm }) {
+  const set = k => e => setForm({ ...form, [k]: e.target.value });
+  return (<div>
+    <div className="dos">
+      <label>Descanso
+        <select value={form.descanso == null ? '' : String(form.descanso)} onChange={set('descanso')}>
+          <option value="">Sin indicar</option>
+          {DESCANSOS.map(s => <option key={s} value={s}>{fmtDescanso(s)}</option>)}
+          {form.descanso != null && form.descanso !== '' && !DESCANSOS.includes(Number(form.descanso)) &&
+            <option value={form.descanso}>{fmtDescanso(Number(form.descanso))}</option>}
+        </select></label>
+      <label>Superserie
+        <select value={form.bloque || ''} onChange={set('bloque')}>
+          <option value="">No, va sola</option>
+          {['A', 'B', 'C', 'D', 'E', 'F'].map(b => <option key={b} value={b}>Bloque {b}</option>)}
+        </select></label>
+    </div>
+    <div className="dos">
+      <label>Intensidad<input value={form.intensidad || ''} maxLength={20} onChange={set('intensidad')}
+        placeholder="RPE 8, RIR 2, 70%" /></label>
+      <label>Tempo<input value={form.tempo || ''} maxLength={15} onChange={set('tempo')} placeholder="3-1-1-0" /></label>
+    </div>
+    <p className="chico" style={{ marginTop: -6, marginBottom: 14 }}>
+      Los ejercicios del mismo bloque se hacen seguidos y la pausa va al terminar la vuelta.</p>
+  </div>);
+}
+// Lo que se manda al servidor desde el formulario.
+const prescripcionDe = f => ({ descanso: f.descanso === '' || f.descanso == null ? null : Number(f.descanso),
+  intensidad: f.intensidad || '', tempo: f.tempo || '', bloque: f.bloque || '' });
+const prescripcionDeItem = it => ({ descanso: it.descanso == null ? '' : it.descanso,
+  intensidad: it.intensidad || '', tempo: it.tempo || '', bloque: it.bloque || '' });
 
 /* La cinta del plan: del arranque al vencimiento, con una marca por semana. */
 function Progreso({ cliente, compacto }) {
@@ -2159,6 +2275,23 @@ function Ficha({ id, volver, abrirRutina, abrirProgreso, clientes, plantillas, r
     {!c.registros.length && !c.seguimiento.length &&
       <div className="vacio"><p>Cuando entrene y anote sus series, vas a verlas acá semana por semana.</p></div>}
 
+    {!!(c.sesiones || []).length &&
+      <div className="card">
+        <h3>Entrenamientos terminados</h3>
+        <p className="chico" style={{ marginBottom: 4 }}>Cuando cierra el día, te cuenta cuánto le costó (del 1 al 10).</p>
+        {c.sesiones.slice(0, 8).map(x => (
+          <div className="fila-hoy" key={x.id}>
+            <div className="quien">
+              <b>{x.dia || 'Día de rutina'}</b>
+              <span className="chico">{fmt(x.fecha)}{x.duracion ? ' · ' + x.duracion + ' min' : ''}</span>
+              {x.nota && <p style={{ marginTop: 2 }}>{x.nota}</p>}
+            </div>
+            {x.esfuerzo &&
+              <span className={'globo ' + (x.esfuerzo >= 9 ? 'alerta' : x.esfuerzo >= 7 ? 'aviso' : 'ok')}>
+                esfuerzo {x.esfuerzo}/10</span>}
+          </div>))}
+      </div>}
+
     {c.registros.map(sem => (
       <div className="semana" key={sem.semana}>
         <h3 style={{ marginBottom: 8 }}>Semana {sem.semana}</h3>
@@ -2335,7 +2468,7 @@ function Impresion({ rutina, alumno, cerrar, perfil }) {
       <CabezaMarca perfil={perfil} />
       <h1>{alumno}</h1>
       <p className="sub-impresa">{rutina.nombre}</p>
-      {rutina.dias.map((d, i) => (
+      {rutina.dias.map((d, i) => { const etiquetas = etiquetasBloque(d.items); return (
         <div className="dia-impreso" key={d.id}>
           <h2>{d.nombre || 'Día ' + (i + 1)}{d.dia_sugerido ? ' — ' + d.dia_sugerido : ''}</h2>
           <table>
@@ -2343,13 +2476,15 @@ function Impresion({ rutina, alumno, cerrar, perfil }) {
             <tbody>
               {d.items.map(it => (
                 <tr key={it.id}>
-                  <td><b>{it.ejercicio}</b></td>
+                  <td>{etiquetas[it.id] && <b>{etiquetas[it.id]} · </b>}<b>{it.ejercicio}</b></td>
                   <td>{it.series}</td><td>{it.reps}</td><td></td>
-                  <td className="nota-impresa">{it.nota || ''}</td>
+                  <td className="nota-impresa">{[...detallesPrescripcion(it), it.nota].filter(Boolean).join(' · ')}</td>
                 </tr>))}
             </tbody>
           </table>
-        </div>))}
+          {!!Object.keys(etiquetas).length &&
+            <p className="nota-impresa" style={{ marginTop: 6 }}>Las letras iguales (A1, A2...) van seguidas, sin pausa entre ellas.</p>}
+        </div>); })}
       <p className="pie-impreso">SmartTrainner</p>
     </div>);
 }
@@ -2566,7 +2701,7 @@ function Editor({ id, volver, ejercicios, grupos, recargarEjercicios }) {
       if (form.item_id) {
         await api('/items/' + form.item_id, { method: 'PATCH',
           body: { series: form.series, reps: form.reps, nota: form.nota,
-                  peso_sugerido: form.peso_sugerido } });
+                  peso_sugerido: form.peso_sugerido, ...prescripcionDe(form) } });
         avisar('Ejercicio actualizado');
       } else {
         let ejId = form.ejercicio_id;
@@ -2577,7 +2712,7 @@ function Editor({ id, volver, ejercicios, grupos, recargarEjercicios }) {
         }
         await api('/dias/' + form.diaId + '/items', { method: 'POST',
           body: { ejercicio_id: ejId, series: form.series, reps: form.reps, nota: form.nota,
-                  peso_sugerido: form.peso_sugerido } });
+                  peso_sugerido: form.peso_sugerido, ...prescripcionDe(form) } });
         setBusq({ ...busq, [form.diaId]: '' });
         avisar('Ejercicio agregado');
       }
@@ -2629,6 +2764,7 @@ function Editor({ id, volver, ejercicios, grupos, recargarEjercicios }) {
 
     {r.dias.map((d, i) => {
       const q = busq[d.id] || '';
+      const etiquetas = etiquetasBloque(d.items);
       const hits = q ? ejercicios.filter(e => e.nombre.toLowerCase().includes(q.toLowerCase())).slice(0, 5) : [];
       return (
         <div className="dia" key={d.id}>
@@ -2652,7 +2788,9 @@ function Editor({ id, volver, ejercicios, grupos, recargarEjercicios }) {
                 <div style={{ display: 'flex', gap: 4 }}>
                   <span className="mango" title="Arrastrar">⠿</span>
                   <div>
+                    {etiquetas[it.id] && <span className="etiqueta-bloque" title="Superserie">{etiquetas[it.id]}</span>}
                     <b>{it.ejercicio}</b>
+                    <Prescripcion item={it} />
                     {it.video_url
                       ? <div><a className="video" href={it.video_url} target="_blank" rel="noopener">Ver el video</a></div>
                       : <div className="chico">Sin video</div>}
@@ -2674,7 +2812,7 @@ function Editor({ id, volver, ejercicios, grupos, recargarEjercicios }) {
                     <button className="btn linea chico" style={{ padding: '5px 10px', fontSize: 12.5 }}
                       onClick={() => setForm({ item_id: it.id, titulo: it.ejercicio, series: it.series || '',
                         reps: it.reps || '', nota: it.nota || '', peso_sugerido: it.peso_sugerido || '',
-                        ultimo: ultimos[it.ejercicio_id] })}>Cambiar</button>
+                        ...prescripcionDeItem(it), ultimo: ultimos[it.ejercicio_id] })}>Cambiar</button>
                   </div>
                 </div>
               </div>
@@ -2723,6 +2861,7 @@ function Editor({ id, volver, ejercicios, grupos, recargarEjercicios }) {
           <input type="number" inputMode="decimal" value={form.peso_sugerido || ''} placeholder="Opcional"
             onChange={e => setForm({ ...form, peso_sugerido: e.target.value })} />
           <span className="chico">El alumno lo ve como punto de partida.</span></label>
+        <CamposPrescripcion form={form} setForm={setForm} />
         <label>Nota para el alumno<input value={form.nota} placeholder="Opcional"
           onChange={e => setForm({ ...form, nota: e.target.value })} /></label>
         <button className="btn" onClick={guardarItem}>{form.item_id ? 'Guardar cambios' : 'Agregar a la rutina'}</button>
@@ -3024,7 +3163,7 @@ function EditorPlantilla({ id, volver, ejercicios, grupos, recargarEjercicios, r
     try {
       if (form.item_id) {
         await api('/plantilla-items/' + form.item_id, { method: 'PATCH',
-          body: { series: form.series, reps: form.reps, nota: form.nota } });
+          body: { series: form.series, reps: form.reps, nota: form.nota, ...prescripcionDe(form) } });
       } else {
         let ejId = form.ejercicio_id;
         if (!ejId) {
@@ -3033,7 +3172,7 @@ function EditorPlantilla({ id, volver, ejercicios, grupos, recargarEjercicios, r
           ejId = e.id; await recargarEjercicios();
         }
         await api('/plantilla-dias/' + form.diaId + '/items', { method: 'POST',
-          body: { ejercicio_id: ejId, series: form.series, reps: form.reps, nota: form.nota } });
+          body: { ejercicio_id: ejId, series: form.series, reps: form.reps, nota: form.nota, ...prescripcionDe(form) } });
         setBusq({ ...busq, [form.diaId]: '' });
       }
       setForm(null); cargar(); await recargar(); avisar('Guardado');
@@ -3084,6 +3223,7 @@ function EditorPlantilla({ id, volver, ejercicios, grupos, recargarEjercicios, r
 
     {p.dias.map((d, i) => {
       const q = busq[d.id] || '';
+      const etiquetas = etiquetasBloque(d.items);
       const hits = q ? ejercicios.filter(e => e.nombre.toLowerCase().includes(q.toLowerCase())).slice(0, 5) : [];
       return (
         <div className="dia" key={d.id}>
@@ -3105,7 +3245,11 @@ function EditorPlantilla({ id, volver, ejercicios, grupos, recargarEjercicios, r
               <div className="ej-top">
                 <div style={{ display: 'flex', gap: 4 }}>
                   <span className="mango">⠿</span>
-                  <div><b>{it.ejercicio}</b>{it.nota && <div className="chico">{it.nota}</div>}</div>
+                  <div>
+                    {etiquetas[it.id] && <span className="etiqueta-bloque" title="Superserie">{etiquetas[it.id]}</span>}
+                    <b>{it.ejercicio}</b>{it.nota && <div className="chico">{it.nota}</div>}
+                    <Prescripcion item={it} />
+                  </div>
                 </div>
                 <div style={{ textAlign: 'right' }}>
                   <div className="series">{it.series}×{it.reps}</div>
@@ -3116,7 +3260,7 @@ function EditorPlantilla({ id, volver, ejercicios, grupos, recargarEjercicios, r
                       disabled={idx === d.items.length - 1} title="Bajar">↓</button>
                     <button className="btn linea chico" style={{ padding: '5px 10px', fontSize: 12.5 }}
                       onClick={() => setForm({ item_id: it.id, titulo: it.ejercicio, series: it.series || '',
-                        reps: it.reps || '', nota: it.nota || '' })}>Cambiar</button>
+                        reps: it.reps || '', nota: it.nota || '', ...prescripcionDeItem(it) })}>Cambiar</button>
                     <button className="btn riesgo chico" style={{ padding: '5px 10px', fontSize: 12.5 }}
                       onClick={() => quitar(it)}>Quitar</button>
                   </div>
@@ -3159,6 +3303,7 @@ function EditorPlantilla({ id, volver, ejercicios, grupos, recargarEjercicios, r
           <label>Series<input value={form.series} onChange={e => setForm({ ...form, series: e.target.value })} /></label>
           <label>Repeticiones<input value={form.reps} onChange={e => setForm({ ...form, reps: e.target.value })} /></label>
         </div>
+        <CamposPrescripcion form={form} setForm={setForm} />
         <label>Nota<input value={form.nota} placeholder="Opcional"
           onChange={e => setForm({ ...form, nota: e.target.value })} /></label>
         <button className="btn" onClick={guardarItem}>{form.item_id ? 'Guardar cambios' : 'Agregar'}</button>
@@ -3435,6 +3580,7 @@ function Ayuda({ perfil, recargarPerfil }) {
       hoja('Registros', d.registros);
       hoja('Peso corporal', d.seguimiento);
       hoja('Pagos', d.pagos);
+      hoja('Entrenamientos', d.sesiones);
       if (!libro.SheetNames.length) { avisar('Todavía no hay datos para exportar', 'mal'); return; }
       XLSX.writeFile(libro, 'smarttrainner-' + d.generado.slice(0, 10) + '.xlsx');
       avisar('Listo, se descargó tu archivo');
@@ -3831,7 +3977,7 @@ function FilaSerie({ n, objetivo, guardada, onGuardar, onBorrar }) {
     </div>);
 }
 
-function EjercicioAlumno({ item, series, observacion, soloLectura, onGuardar, onBorrar, onObservar }) {
+function EjercicioAlumno({ item, series, observacion, soloLectura, onGuardar, onBorrar, onObservar, etiqueta }) {
   const [abierta, setAbierta] = useState(!!observacion);
   const [nota, setNota] = useState(observacion || '');
   const [guardandoNota, setGuardandoNota] = useState(false);
@@ -3853,13 +3999,15 @@ function EjercicioAlumno({ item, series, observacion, soloLectura, onGuardar, on
   }
 
   return (
-    <div className="ej">
+    <div className={'ej' + (etiqueta ? ' en-bloque' : '')}>
       <div className="ej-top">
         <div>
+          {etiqueta && <span className="etiqueta-bloque" title="Superserie">{etiqueta}</span>}
           <b>{item.ejercicio}</b>
           {item.video_url &&
             <div><a className="video" href={item.video_url} target="_blank" rel="noopener">Ver el video</a></div>}
           {item.nota && <div className="chico">{item.nota}</div>}
+          <Prescripcion item={item} />
         </div>
         <div className="series">{item.series}×{item.reps}</div>
       </div>
@@ -3900,6 +4048,205 @@ function EjercicioAlumno({ item, series, observacion, soloLectura, onGuardar, on
     </div>);
 }
 
+/* ---------- modo entrenando ----------
+   Un ejercicio por pantalla. Al anotar una serie arranca solo el descanso que
+   puso el profe; en una superserie pasa directo al ejercicio siguiente del bloque
+   y la pausa va al terminar la vuelta. La pantalla no se apaga mientras entrena. */
+let audio = null;
+// El sonido se prepara con un toque del alumno: los celulares no dejan sonar sin eso.
+function prepararSonido() {
+  try {
+    const C = window.AudioContext || window.webkitAudioContext;
+    if (!C) return;
+    if (!audio) audio = new C();
+    if (audio.state === 'suspended') audio.resume();
+  } catch { /* sin sonido, queda la vibración */ }
+}
+function avisoFinDescanso() {
+  try {
+    if (audio) [0, 0.25, 0.5].forEach(t => {
+      const o = audio.createOscillator(), g = audio.createGain(), ahora = audio.currentTime + t;
+      o.frequency.value = 880;
+      g.gain.setValueAtTime(0.25, ahora);
+      g.gain.exponentialRampToValueAtTime(0.001, ahora + 0.18);
+      o.connect(g); g.connect(audio.destination);
+      o.start(ahora); o.stop(ahora + 0.2);
+    });
+  } catch { /* sin sonido */ }
+  if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+}
+
+// Que la pantalla no se apague mientras entrena (si el celular lo permite).
+function usarPantallaPrendida() {
+  useEffect(() => {
+    let candado = null;
+    const pedir = async () => {
+      try {
+        if (navigator.wakeLock && document.visibilityState === 'visible')
+          candado = await navigator.wakeLock.request('screen');
+      } catch { /* no lo permite: sigue igual */ }
+    };
+    pedir();
+    const volvio = () => { if (document.visibilityState === 'visible') pedir(); };
+    document.addEventListener('visibilitychange', volvio);
+    return () => {
+      document.removeEventListener('visibilitychange', volvio);
+      if (candado) candado.release().catch(() => {});
+    };
+  }, []);
+}
+
+function Descanso({ descanso, siguiente, sumar, saltar, terminar }) {
+  const [, tic] = useState(0);
+  const avisado = useRef(false);
+  useEffect(() => {
+    avisado.current = false;
+    const t = setInterval(() => tic(n => n + 1), 250);
+    return () => clearInterval(t);
+  }, [descanso.fin]);
+  const resta = Math.max(0, Math.ceil((descanso.fin - Date.now()) / 1000));
+  useEffect(() => {
+    if (resta === 0 && !avisado.current) { avisado.current = true; avisoFinDescanso(); terminar(); }
+  });
+  const pct = descanso.total ? (1 - resta / descanso.total) * 100 : 100;
+  return (
+    <div className="reloj" role="timer" aria-live="off">
+      <div className="adentro">
+        <span className={'tiempo' + (resta === 0 ? ' listo' : '')}>{reloj(resta)}</span>
+        <div className="que">
+          <b>{resta === 0 ? '¡A darle!' : 'Descansá'}</b>
+          {siguiente && <span>Sigue: {siguiente}</span>}
+          <div className="cinta"><i className="lleno" style={{ width: Math.max(2, pct) + '%' }} /></div>
+        </div>
+        <button className="btn linea chico" onClick={sumar}>+15 s</button>
+        <button className="btn chico" onClick={saltar}>Saltar</button>
+      </div>
+    </div>);
+}
+
+const pedidasDe = it => cuantasSeries(it.series);
+const hechasDe = (series, it) => series.filter(s => s.item_id === it.id).length;
+
+function ModoEntreno({ dia, series, obsDe, guardarSerie, borrarSerie, observar, terminar, salir, inicial }) {
+  const items = dia.items;
+  const [idx, setIdx] = useState(Math.min(inicial.idx || 0, Math.max(0, items.length - 1)));
+  const [descanso, setDescanso] = useState(null);
+  const [cierre, setCierre] = useState(null);     // { esfuerzo, nota } cuando abre "Terminé"
+  const [listo, setListo] = useState(null);       // resumen al terminar
+  const etiquetas = etiquetasBloque(items);
+  usarPantallaPrendida();
+  useEffect(() => { inicial.guardar({ idx }); }, [idx]);
+
+  const it = items[idx];
+  const completo = lista => items.every(x => hechasDe(lista, x) >= pedidasDe(x));
+
+  // Qué viene después de anotar una serie, y cuánto se descansa.
+  async function anotar(item, n, kg, reps) {
+    prepararSonido();
+    const nuevas = await guardarSerie(item, n, kg, reps);
+    if (!nuevas) return;
+    const i = items.findIndex(x => x.id === item.id);
+    const sig = items[i + 1];
+    if (item.bloque && sig && sig.bloque === item.bloque) { setIdx(i + 1); return; }   // superserie: sin pausa
+    let destino = i;
+    if (item.bloque) {
+      let primero = i;
+      while (primero > 0 && items[primero - 1].bloque === item.bloque) primero--;
+      // Otra vuelta si al primero del bloque le quedan series; si no, al que sigue.
+      destino = hechasDe(nuevas, items[primero]) < pedidasDe(items[primero]) ? primero : i + 1;
+    } else if (hechasDe(nuevas, item) >= pedidasDe(item)) destino = i + 1;
+    if (completo(nuevas)) { setCierre({ esfuerzo: null, nota: '' }); return; }
+    if (destino >= items.length) destino = items.length - 1;
+    // En una superserie el profe suele poner la pausa en uno solo: vale la del último del bloque que la tenga.
+    const delBloque = item.bloque ? items.filter(x => x.bloque === item.bloque) : [item];
+    const conPausa = [...delBloque].reverse().find(x => x.descanso != null);
+    const segundos = conPausa ? conPausa.descanso : DESCANSO_SIN_DATO;
+    if (!segundos) { setIdx(destino); return; }
+    setDescanso({ fin: Date.now() + segundos * 1000, total: segundos, destino });
+  }
+
+  async function cerrar() {
+    const minutos = Math.round((Date.now() - inicial.inicio) / 60000);
+    const ok = await terminar({ dia_id: dia.id, esfuerzo: cierre.esfuerzo, nota: cierre.nota,
+      duracion: minutos > 0 && minutos <= 600 ? minutos : null });
+    if (!ok) return;
+    setCierre(null);
+    setListo({ series: items.reduce((s, x) => s + hechasDe(series, x), 0), minutos });
+  }
+
+  if (listo) return (
+    <div className="vacio" style={{ marginTop: 10 }}>
+      <h2 style={{ marginBottom: 8 }}>¡Bien ahí! 💪</h2>
+      <p>Terminaste {dia.nombre || 'el día'}: {cuantos(listo.series, 'serie anotada', 'series anotadas')}
+        {listo.minutos > 0 && listo.minutos <= 600 ? ' en ' + cuantos(listo.minutos, 'minuto', 'minutos') : ''}. Tu profe ya lo puede ver.</p>
+      <button className="btn" onClick={salir}>Volver a mi rutina</button>
+    </div>);
+
+  const destinoTxt = descanso && items[descanso.destino] ? items[descanso.destino].ejercicio : null;
+  return (
+    <div className="entreno" style={descanso ? { paddingBottom: 90 } : null}>
+      <div className="entreno-cab">
+        <div className="que">
+          <b>{dia.nombre || 'Entrenamiento'}</b>
+          <span className="chico">Ejercicio {idx + 1} de {items.length}</span>
+        </div>
+        <button className="btn linea chico" onClick={salir}>Salir</button>
+      </div>
+      <div className="pasos" aria-hidden="true">
+        {items.map((x, i) => <i key={x.id} className={i === idx ? 'ahora'
+          : hechasDe(series, x) >= pedidasDe(x) ? 'hecho' : ''} />)}
+      </div>
+
+      {it.bloque &&
+        <div className="cabeza-bloque" style={{ marginTop: 0, marginBottom: 8 }}>
+          Superserie {it.bloque}: {items.filter(x => x.bloque === it.bloque).map(x => x.ejercicio).join(' + ')}</div>}
+
+      <div className="dia">
+        <EjercicioAlumno key={it.id} item={it} series={series} observacion={obsDe(it)} etiqueta={etiquetas[it.id]}
+          onGuardar={anotar} onBorrar={borrarSerie} onObservar={observar} />
+      </div>
+
+      <div className="entreno-nav">
+        <button className="btn linea" disabled={idx === 0} onClick={() => { setDescanso(null); setIdx(idx - 1); }}>‹ Anterior</button>
+        {idx < items.length - 1
+          ? <button className="btn linea" onClick={() => { setDescanso(null); setIdx(idx + 1); }}>Siguiente ›</button>
+          : <button className="btn" onClick={() => setCierre({ esfuerzo: null, nota: '' })}>Terminé</button>}
+      </div>
+      {idx < items.length - 1 &&
+        <button className="agregar-nota" style={{ display: 'block', margin: '10px auto 0' }}
+          onClick={() => setCierre({ esfuerzo: null, nota: '' })}>Terminar el entrenamiento</button>}
+
+      {descanso &&
+        <Descanso descanso={descanso} siguiente={destinoTxt}
+          sumar={() => setDescanso({ ...descanso, fin: descanso.fin + 15000, total: descanso.total + 15 })}
+          saltar={() => { setIdx(descanso.destino); setDescanso(null); }}
+          terminar={() => {
+            setIdx(descanso.destino);
+            // El "¡A darle!" queda unos segundos y se va (salvo que haya arrancado otro descanso).
+            const fin = descanso.fin;
+            setTimeout(() => setDescanso(x => (x && x.fin === fin ? null : x)), 4000);
+          }} />}
+
+      {cierre &&
+        <Modal titulo="¿Cómo te sentiste?" sub="Contale a tu profe cuánto te costó el entrenamiento de hoy."
+          cerrar={() => setCierre(null)}>
+          <div className="esfuerzo" role="group" aria-label="Esfuerzo del 1 al 10">
+            {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+              <button key={n} className={cierre.esfuerzo === n ? 'on' : ''} aria-pressed={cierre.esfuerzo === n}
+                onClick={() => setCierre({ ...cierre, esfuerzo: n })}>{n}</button>))}
+          </div>
+          <p className="chico" style={{ marginTop: -8, marginBottom: 14 }}>1 = muy fácil · 10 = no podía más</p>
+          <label>¿Algo para contarle?
+            <textarea rows="3" maxLength={500} value={cierre.nota} placeholder="Opcional"
+              onChange={e => setCierre({ ...cierre, nota: e.target.value })} /></label>
+          {!completo(series) &&
+            <p className="chico" style={{ marginTop: -6, marginBottom: 14 }}>
+              Te quedaron series sin anotar. Si las hiciste, podés volver y cargarlas.</p>}
+          <button className="btn" onClick={cerrar}>Terminar entrenamiento</button>
+        </Modal>}
+    </div>);
+}
+
 function VistaAlumno({ token }) {
   const [d, setD] = useState(null);
   const [error, setError] = useState('');
@@ -3917,6 +4264,24 @@ function VistaAlumno({ token }) {
 
   // Sin señal, la app instalada muestra la última rutina guardada (ver public/sw.js).
   const [sinConexion, setSinConexion] = useState(false);
+
+  // Modo entrenando: { dia, idx, inicio }. Se guarda en el celular para retomar si se cierra la app.
+  const claveEntreno = 'st_entreno_' + token;
+  const [entreno, setEntreno] = useState(() => {
+    try {
+      const e = JSON.parse(localStorage.getItem(claveEntreno) || 'null');
+      return e && e.dia && Date.now() - e.inicio < 4 * 3600e3 ? e : null;
+    } catch { return null; }
+  });
+  const guardarEntreno = e => { try {
+    if (e) localStorage.setItem(claveEntreno, JSON.stringify(e)); else localStorage.removeItem(claveEntreno);
+  } catch { /* modo privado: igual funciona mientras no se cierre */ } };
+  function empezar(dia) {
+    prepararSonido();
+    const e = { dia: dia.id, idx: 0, inicio: Date.now() };
+    guardarEntreno(e); setEntreno(e); window.scrollTo(0, 0);
+  }
+  function salirEntreno() { guardarEntreno(null); setEntreno(null); window.scrollTo(0, 0); }
 
   const cargar = useCallback(() => {
     fetch('/api/alumno/' + token + (semana ? '?semana=' + semana : ''))
@@ -3950,7 +4315,17 @@ function VistaAlumno({ token }) {
         body: JSON.stringify({ item_id: item.id, numero, kg, reps }) });
       setD(prev => ({ ...prev, series: r.series }));
       avisar('Serie ' + numero + ' anotada');
-    } catch (e) { avisar(e.message, 'mal'); }
+      return r.series;
+    } catch (e) { avisar(e.message, 'mal'); return null; }
+  }
+
+  async function terminarSesion(datos) {
+    try {
+      const r = await pedir('/sesion', { method: 'POST', body: JSON.stringify(datos) });
+      setD(prev => ({ ...prev, sesiones: r.sesiones }));
+      guardarEntreno(null);
+      return true;
+    } catch (e) { avisar(e.message, 'mal'); return false; }
   }
 
   async function borrarSerie(id) {
@@ -3993,7 +4368,7 @@ function VistaAlumno({ token }) {
     return o ? o.texto : '';
   };
 
-  return (<div>
+  const cabecera = (<>
     {marca
       ? <div className="topbar"><div className="brand">
           {marca.logo && <img className="logo-marca" alt="" src={'/api/alumno/' + token + '/logo?v=' + marca.version} />}
@@ -4003,6 +4378,26 @@ function VistaAlumno({ token }) {
           <div className="derecha"><BotonTema /></div></div></div>}
     {sinConexion &&
       <div className="sin-conexion" role="status">Sin conexión: estás viendo la última versión guardada de tu rutina.</div>}
+  </>);
+
+  // Entrenando: solo se puede en la semana en curso y con un día que siga estando en la rutina.
+  const enCurso = d.rutina && d.semana === d.semana_en_curso;
+  const diaEntreno = entreno && enCurso ? d.rutina.dias.find(x => x.id === entreno.dia) : null;
+  if (diaEntreno) return (<div>
+    {cabecera}
+    <div className="wrap angosto">
+      <ModoEntreno dia={diaEntreno} series={d.series || []} obsDe={obsDe}
+        guardarSerie={guardarSerie} borrarSerie={borrarSerie} observar={observar} terminar={terminarSesion}
+        salir={salirEntreno}
+        inicial={{ idx: entreno.idx, inicio: entreno.inicio,
+                   guardar: cambios => guardarEntreno({ ...entreno, ...cambios }) }} />
+    </div>
+  </div>);
+  // La sesión que terminó esta semana en cada día de la rutina.
+  const sesionDe = dia => (d.sesiones || []).find(x => x.dia_id === dia.id);
+
+  return (<div>
+    {cabecera}
     <div className="wrap angosto">
       <h2>Hola, {(d.nombre || '').split(' ')[0]}</h2>
 
@@ -4069,17 +4464,33 @@ function VistaAlumno({ token }) {
             <button className="btn linea chico" style={{ marginBottom: 14 }}
               onClick={() => setSemana(null)}>Volver a mi semana</button>}
           <p className="suave" style={{ marginBottom: 18 }}>{d.rutina.nombre}</p>
-          {d.rutina.dias.map((dia, i) => (
+          {d.rutina.dias.map((dia, i) => {
+            const etiquetas = etiquetasBloque(dia.items);
+            const ses = sesionDe(dia);
+            return (
             <div className="dia" key={dia.id}>
               <div className="row">
                 <h3>{dia.nombre || 'Día ' + (i + 1)}</h3>
                 {dia.dia_sugerido && <span className="globo">{dia.dia_sugerido}</span>}
               </div>
-              {dia.items.map(it => (
-                <EjercicioAlumno key={it.id} item={it} series={d.series || []}
-                  observacion={obsDe(it)} soloLectura={d.semana !== d.semana_en_curso}
-                  onGuardar={guardarSerie} onBorrar={borrarSerie} onObservar={observar} />))}
-            </div>))}
+              {ses &&
+                <div className="terminado">
+                  <span className="globo ok">✓ Terminado el {fmt(ses.fecha)}</span>
+                  {ses.esfuerzo && <span className="chico">esfuerzo {ses.esfuerzo}/10</span>}
+                </div>}
+              {enCurso && !!dia.items.length &&
+                <button className={'btn ' + (ses ? 'linea ' : '') + 'chico'} style={{ marginTop: 10 }}
+                  onClick={() => empezar(dia)}>{ses ? 'Volver a entrenar este día' : 'Empezar a entrenar'}</button>}
+              {dia.items.map((it, j) => (
+                <React.Fragment key={it.id}>
+                  {it.bloque && (j === 0 || dia.items[j - 1].bloque !== it.bloque) &&
+                    <div className="cabeza-bloque">
+                      Superserie {it.bloque}: hacé estos ejercicios seguidos y descansá al terminar la vuelta.</div>}
+                  <EjercicioAlumno item={it} series={d.series || []} etiqueta={etiquetas[it.id]}
+                    observacion={obsDe(it)} soloLectura={d.semana !== d.semana_en_curso}
+                    onGuardar={guardarSerie} onBorrar={borrarSerie} onObservar={observar} />
+                </React.Fragment>))}
+            </div>); })}
         </div>)}
 
       <div className="card">
@@ -4254,6 +4665,24 @@ function Hoy({ perfil, abrirAlumno, irA }) {
                 <div className="acciones">
                   <BotonWhatsApp principal contacto={c.contacto} texto={MENSAJE.cumple(c.nombre)}>Saludar</BotonWhatsApp>
                 </div>}
+            </div>))}
+        </div>}
+
+      {!!(d.sesiones || []).length &&
+        <div className="card bloque-hoy">
+          <div className="row"><h3>Terminaron de entrenar<span className="cuenta">{d.sesiones.length}</span></h3></div>
+          <p className="chico" style={{ marginBottom: 4 }}>Lo que contaron al cerrar el día, en los últimos días.</p>
+          {d.sesiones.map(x => (
+            <div className="fila-hoy" key={x.id}>
+              <div className="quien">
+                <EnlaceAlumno abrir={abrirAlumno} id={x.cliente_id}><b>{x.alumno}</b></EnlaceAlumno>
+                <span className="chico">{(x.dia || 'Día de rutina') + ' · ' + fmt(x.fecha)}
+                  {x.duracion ? ' · ' + x.duracion + ' min' : ''}</span>
+                {x.nota && <p style={{ marginTop: 2 }}>{x.nota}</p>}
+              </div>
+              {x.esfuerzo &&
+                <span className={'globo ' + (x.esfuerzo >= 9 ? 'alerta' : x.esfuerzo >= 7 ? 'aviso' : 'ok')}>
+                  {x.esfuerzo}/10</span>}
             </div>))}
         </div>}
 

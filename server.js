@@ -226,6 +226,13 @@ const TABLAS = [
      fecha TEXT NOT NULL, monto REAL NOT NULL, medio TEXT, nota TEXT, vence TEXT, creado TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS ix_pagos_cuenta ON pagos(cuenta_id, fecha)`,
   `CREATE INDEX IF NOT EXISTS ix_pagos_cliente ON pagos(cliente_id, fecha)`,
+  // Entrenamiento terminado: el alumno cierra el día y cuenta cómo le fue. Uno por día de rutina y fecha.
+  `CREATE TABLE IF NOT EXISTS sesiones (
+     id TEXT PRIMARY KEY, cuenta_id TEXT NOT NULL, cliente_id TEXT NOT NULL,
+     rutina_id TEXT, dia_id TEXT NOT NULL, fecha TEXT NOT NULL, semana INTEGER,
+     esfuerzo INTEGER, nota TEXT, duracion INTEGER, creado TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS ix_sesiones_cliente ON sesiones(cliente_id, fecha)`,
+  `CREATE INDEX IF NOT EXISTS ix_sesiones_cuenta ON sesiones(cuenta_id, fecha)`,
   `CREATE INDEX IF NOT EXISTS ix_clientes_cuenta ON clientes(cuenta_id)`,
   `CREATE INDEX IF NOT EXISTS ix_clientes_token ON clientes(token)`,
   `CREATE INDEX IF NOT EXISTS ix_ejercicios_cuenta ON ejercicios(cuenta_id)`,
@@ -273,7 +280,17 @@ const COLUMNAS = [
   ['clientes', 'precio', 'REAL'],
   ['clientes', 'nacimiento', 'TEXT'],
   ['clientes', 'creado', 'TEXT'],
-  ['clientes', 'baja', 'TEXT']
+  ['clientes', 'baja', 'TEXT'],
+  // Prescripción de cada ejercicio: pausa en segundos, intensidad ("RPE 8", "RIR 2",
+  // "70%"), tempo ("3-1-1-0") y bloque de superserie (los de la misma letra van seguidos).
+  ['rutina_items', 'descanso', 'INTEGER'],
+  ['rutina_items', 'intensidad', 'TEXT'],
+  ['rutina_items', 'tempo', 'TEXT'],
+  ['rutina_items', 'bloque', 'TEXT'],
+  ['plantilla_items', 'descanso', 'INTEGER'],
+  ['plantilla_items', 'intensidad', 'TEXT'],
+  ['plantilla_items', 'tempo', 'TEXT'],
+  ['plantilla_items', 'bloque', 'TEXT']
 ];
 
 async function prepararBase() {
@@ -389,6 +406,38 @@ const RANGOS = {
   plata: [0, 100000000]   // cuota o pago, en pesos
 };
 const MEDIOS_PAGO = ['efectivo', 'transferencia', 'mercadopago', 'tarjeta', 'otro'];
+
+/* Prescripción de un ejercicio: descanso, intensidad, tempo y superserie.
+   Devuelve { error } o { valores }. Lo que no viene en el pedido queda afuera,
+   así al editar se respeta lo que ya estaba. */
+const BLOQUES = ['A', 'B', 'C', 'D', 'E', 'F'];
+const EXTRAS = ['descanso', 'intensidad', 'tempo', 'bloque'];
+function revisarPrescripcion(b) {
+  b = b || {};
+  const valores = {};
+  if (b.descanso !== undefined) {
+    if (b.descanso === '' || b.descanso === null) valores.descanso = null;
+    else {
+      const n = numeroEn(b.descanso, 0, 900);
+      if (n === null || !Number.isInteger(n)) return { error: 'El descanso tiene que ser de 0 a 15 minutos.' };
+      valores.descanso = n;
+    }
+  }
+  for (const [k, max, nombre] of [['intensidad', 20, 'La intensidad'], ['tempo', 15, 'El tempo']]) {
+    if (b[k] === undefined) continue;
+    const t = String(b[k] == null ? '' : b[k]).replace(/[\u0000-\u001F\u007F]/g, '').trim();
+    if (t.length > max) return { error: `${nombre} puede tener hasta ${max} caracteres.` };
+    valores[k] = t || null;
+  }
+  if (b.bloque !== undefined) {
+    const t = String(b.bloque == null ? '' : b.bloque).trim().toUpperCase();
+    if (t && !BLOQUES.includes(t)) return { error: 'La superserie tiene que ser una letra de la A a la F.' };
+    valores.bloque = t || null;
+  }
+  return { valores };
+}
+// Los cuatro valores para un INSERT (lo que no vino, vacío).
+const extrasDe = x => EXTRAS.map(k => (x && x[k] !== undefined ? x[k] : null));
 
 /* Un link de video tiene que ser un link, no código.
    Sin esto, alguien podría guardar "javascript:..." y ejecutarlo al tocarlo. */
@@ -874,7 +923,8 @@ const data = {
     return true;
   },
 
-  async agregarItem(cuentaId, diaId, { ejercicio_id, series, reps, nota, peso_sugerido }) {
+  async agregarItem(cuentaId, diaId, b) {
+    const { ejercicio_id, series, reps, nota, peso_sugerido } = b;
     if (!await data.dia(cuentaId, diaId)) return null;
     const ej = (await data.q('SELECT id FROM ejercicios WHERE id = ? AND cuenta_id = ?',
       [ejercicio_id, cuentaId]))[0];
@@ -883,20 +933,26 @@ const data = {
       'SELECT COUNT(*) AS n FROM rutina_items WHERE dia_id = ? AND cuenta_id = ?', [diaId, cuentaId]))[0].n);
     const id = uid();
     await data.run(
-      `INSERT INTO rutina_items (id, cuenta_id, dia_id, ejercicio_id, orden, series, reps, nota, peso_sugerido)
-       VALUES (?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO rutina_items (id, cuenta_id, dia_id, ejercicio_id, orden, series, reps, nota, peso_sugerido,
+                                 descanso, intensidad, tempo, bloque)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [id, cuentaId, diaId, ejercicio_id, n, series || null, reps || null, nota || null,
-       peso_sugerido || null]);
+       peso_sugerido || null, ...extrasDe(b)]);
     return { id };
   },
 
-  async editarItem(cuentaId, id, { series, reps, nota, peso_sugerido }) {
-    const it = (await data.q('SELECT id FROM rutina_items WHERE id = ? AND cuenta_id = ?', [id, cuentaId]))[0];
+  // La prescripción (descanso, intensidad, tempo, bloque) que no viene en el pedido queda como estaba.
+  async editarItem(cuentaId, id, b) {
+    const { series, reps, nota, peso_sugerido } = b;
+    const it = (await data.q('SELECT * FROM rutina_items WHERE id = ? AND cuenta_id = ?', [id, cuentaId]))[0];
     if (!it) return false;
     await data.run(
-      'UPDATE rutina_items SET series = ?, reps = ?, nota = ?, peso_sugerido = ? WHERE id = ? AND cuenta_id = ?',
+      `UPDATE rutina_items SET series = ?, reps = ?, nota = ?, peso_sugerido = ?,
+                               descanso = ?, intensidad = ?, tempo = ?, bloque = ?
+        WHERE id = ? AND cuenta_id = ?`,
       [series || null, reps || null, nota || null,
-       peso_sugerido === '' ? null : (peso_sugerido || null), id, cuentaId]);
+       peso_sugerido === '' ? null : (peso_sugerido || null),
+       ...EXTRAS.map(k => (b[k] !== undefined ? b[k] : it[k])), id, cuentaId]);
     return true;
   },
 
@@ -938,9 +994,10 @@ const data = {
         const peso = logrado ? String(logrado.kg) : (it.peso_sugerido || null);
         if (logrado) copiados++;
         await data.run(
-          `INSERT INTO rutina_items (id, cuenta_id, dia_id, ejercicio_id, orden, series, reps, nota, peso_sugerido)
-           VALUES (?,?,?,?,?,?,?,?,?)`,
-          [uid(), cuentaId, diaId, it.ejercicio_id, it.orden, it.series, it.reps, it.nota, peso]);
+          `INSERT INTO rutina_items (id, cuenta_id, dia_id, ejercicio_id, orden, series, reps, nota, peso_sugerido,
+                                     descanso, intensidad, tempo, bloque)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [uid(), cuentaId, diaId, it.ejercicio_id, it.orden, it.series, it.reps, it.nota, peso, ...extrasDe(it)]);
       }
     }
     const rutina = await data.rutinaCompleta(cuentaId, nuevaId);
@@ -1236,7 +1293,8 @@ const data = {
     return true;
   },
 
-  async agregarItemPlantilla(cuentaId, diaId, { ejercicio_id, series, reps, nota }) {
+  async agregarItemPlantilla(cuentaId, diaId, b) {
+    const { ejercicio_id, series, reps, nota } = b;
     if (!await data.plantillaDia(cuentaId, diaId)) return null;
     const ej = (await data.q('SELECT id FROM ejercicios WHERE id = ? AND cuenta_id = ?', [ejercicio_id, cuentaId]))[0];
     if (!ej) return null;
@@ -1244,17 +1302,22 @@ const data = {
       'SELECT COUNT(*) AS n FROM plantilla_items WHERE dia_id = ? AND cuenta_id = ?', [diaId, cuentaId]))[0].n);
     const id = uid();
     await data.run(
-      `INSERT INTO plantilla_items (id, cuenta_id, dia_id, ejercicio_id, orden, series, reps, nota)
-       VALUES (?,?,?,?,?,?,?,?)`,
-      [id, cuentaId, diaId, ejercicio_id, n, series || null, reps || null, nota || null]);
+      `INSERT INTO plantilla_items (id, cuenta_id, dia_id, ejercicio_id, orden, series, reps, nota,
+                                    descanso, intensidad, tempo, bloque)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [id, cuentaId, diaId, ejercicio_id, n, series || null, reps || null, nota || null, ...extrasDe(b)]);
     return { id };
   },
 
-  async editarItemPlantilla(cuentaId, id, { series, reps, nota }) {
-    const it = (await data.q('SELECT id FROM plantilla_items WHERE id = ? AND cuenta_id = ?', [id, cuentaId]))[0];
+  async editarItemPlantilla(cuentaId, id, b) {
+    const { series, reps, nota } = b;
+    const it = (await data.q('SELECT * FROM plantilla_items WHERE id = ? AND cuenta_id = ?', [id, cuentaId]))[0];
     if (!it) return false;
-    await data.run('UPDATE plantilla_items SET series = ?, reps = ?, nota = ? WHERE id = ? AND cuenta_id = ?',
-      [series || null, reps || null, nota || null, id, cuentaId]);
+    await data.run(
+      `UPDATE plantilla_items SET series = ?, reps = ?, nota = ?, descanso = ?, intensidad = ?, tempo = ?, bloque = ?
+        WHERE id = ? AND cuenta_id = ?`,
+      [series || null, reps || null, nota || null,
+       ...EXTRAS.map(k => (b[k] !== undefined ? b[k] : it[k])), id, cuentaId]);
     return true;
   },
 
@@ -1284,9 +1347,11 @@ const data = {
         [diaId, cuentaId, id, d.orden, d.nombre, d.dia_sugerido]);
       for (const it of d.items)
         await data.run(
-          `INSERT INTO plantilla_items (id, cuenta_id, dia_id, ejercicio_id, orden, series, reps, nota, peso_sugerido)
-           VALUES (?,?,?,?,?,?,?,?,?)`,
-          [uid(), cuentaId, diaId, it.ejercicio_id, it.orden, it.series, it.reps, it.nota, it.peso_sugerido]);
+          `INSERT INTO plantilla_items (id, cuenta_id, dia_id, ejercicio_id, orden, series, reps, nota, peso_sugerido,
+                                        descanso, intensidad, tempo, bloque)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [uid(), cuentaId, diaId, it.ejercicio_id, it.orden, it.series, it.reps, it.nota, it.peso_sugerido,
+           ...extrasDe(it)]);
     }
     return data.plantillaCompleta(cuentaId, id);
   },
@@ -1306,9 +1371,11 @@ const data = {
         [diaId, cuentaId, rutinaId, d.orden, d.nombre, d.dia_sugerido]);
       for (const it of d.items)
         await data.run(
-          `INSERT INTO rutina_items (id, cuenta_id, dia_id, ejercicio_id, orden, series, reps, nota, peso_sugerido)
-           VALUES (?,?,?,?,?,?,?,?,?)`,
-          [uid(), cuentaId, diaId, it.ejercicio_id, it.orden, it.series, it.reps, it.nota, it.peso_sugerido]);
+          `INSERT INTO rutina_items (id, cuenta_id, dia_id, ejercicio_id, orden, series, reps, nota, peso_sugerido,
+                                     descanso, intensidad, tempo, bloque)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [uid(), cuentaId, diaId, it.ejercicio_id, it.orden, it.series, it.reps, it.nota, it.peso_sugerido,
+           ...extrasDe(it)]);
     }
     return data.rutinaCompleta(cuentaId, rutinaId);
   },
@@ -1429,6 +1496,37 @@ const data = {
   observacionesDeLaSemana: (cuentaId, clienteId, semana, desde) =>
     data.q('SELECT * FROM observaciones WHERE cuenta_id = ? AND cliente_id = ? AND semana = ? AND fecha >= ?',
       [cuentaId, clienteId, semana, desdeCiclo(desde)]),
+
+  /* --- entrenamiento terminado: el alumno cierra el día y cuenta cómo le fue --- */
+  // Uno por día de rutina y fecha: si lo vuelve a cerrar, se corrige.
+  async terminarSesion(cliente, { dia_id, esfuerzo, nota, duracion }) {
+    const d = (await data.q(
+      `SELECT d.id, d.rutina_id FROM rutina_dias d JOIN rutinas r ON r.id = d.rutina_id AND r.cuenta_id = d.cuenta_id
+        WHERE d.id = ? AND d.cuenta_id = ? AND r.cliente_id = ?`, [dia_id, cliente.cuenta_id, cliente.id]))[0];
+    if (!d) return null;
+    const h = hoy();
+    const ya = (await data.q('SELECT id FROM sesiones WHERE cliente_id = ? AND dia_id = ? AND fecha = ?',
+      [cliente.id, d.id, h]))[0];
+    if (ya) await data.run('UPDATE sesiones SET esfuerzo = ?, nota = ?, duracion = ?, creado = ? WHERE id = ?',
+      [esfuerzo, nota, duracion, ahora(), ya.id]);
+    else await data.run(
+      `INSERT INTO sesiones (id, cuenta_id, cliente_id, rutina_id, dia_id, fecha, semana, esfuerzo, nota, duracion, creado)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      [uid(), cliente.cuenta_id, cliente.id, d.rutina_id, d.id, h, semanaDe(cliente.inicio),
+       esfuerzo, nota, duracion, ahora()]);
+    return { ok: true };
+  },
+
+  sesionesDeLaSemana: (cuentaId, clienteId, semana, desde) =>
+    data.q('SELECT * FROM sesiones WHERE cuenta_id = ? AND cliente_id = ? AND semana = ? AND fecha >= ?',
+      [cuentaId, clienteId, semana, desdeCiclo(desde)]),
+
+  // Para el entrenador: los últimos entrenamientos terminados, con el nombre del día.
+  sesionesDe: (cuentaId, clienteId) =>
+    data.q(`SELECT s.*, d.nombre AS dia FROM sesiones s
+              LEFT JOIN rutina_dias d ON d.id = s.dia_id AND d.cuenta_id = s.cuenta_id
+             WHERE s.cuenta_id = ? AND s.cliente_id = ? ORDER BY s.fecha DESC, s.creado DESC LIMIT 30`,
+      [cuentaId, clienteId]),
 
   /* --- indicaciones del entrenador --- */
   indicacionActiva: async (cuentaId, clienteId) =>
@@ -1678,6 +1776,15 @@ const data = {
         WHERE o.cuenta_id = ? AND c.activo = 1 AND o.fecha >= ?
         ORDER BY o.creado DESC LIMIT 20`, [cuentaId, sumarDias(h, -3)]);
 
+    // Entrenamientos que los alumnos cerraron en los últimos días, con el esfuerzo que contaron.
+    const sesiones = await data.q(
+      `SELECT s.id, s.cliente_id, s.fecha, s.esfuerzo, s.nota, s.duracion, c.nombre AS alumno, d.nombre AS dia
+         FROM sesiones s
+         JOIN clientes c ON c.id = s.cliente_id AND c.cuenta_id = s.cuenta_id
+         LEFT JOIN rutina_dias d ON d.id = s.dia_id AND d.cuenta_id = s.cuenta_id
+        WHERE s.cuenta_id = ? AND c.activo = 1 AND s.fecha >= ?
+        ORDER BY s.creado DESC LIMIT 20`, [cuentaId, sumarDias(h, -2)]);
+
     const cumples = clientes.filter(c => esFecha(c.nacimiento))
       .map(c => Object.assign({ id: c.id, nombre: c.nombre, contacto: c.contacto }, proximoCumple(c.nacimiento, h)))
       .filter(c => c.dias <= 7)
@@ -1691,7 +1798,7 @@ const data = {
     return {
       fecha: h, alumnos: clientes.length,
       turnos_hoy: delDia(h), turnos_manana: delDia(sumarDias(h, 1)),
-      vencen, inactivos: inactivos.slice(0, 15), observaciones, cumples,
+      vencen, inactivos: inactivos.slice(0, 15), observaciones, sesiones, cumples,
       caja: { mes, cobrado: Number(caja.total), pagos: Number(caja.n) }
     };
   },
@@ -2203,6 +2310,7 @@ app.get('/api/clientes/:id', auth, ruta(async (req, res) => {
   c.seguimiento = await data.seguimientoDe(req.cuentaId, c.id);
   c.asistencia = await data.resumenAsistencia(req.cuentaId, c.id, c.inicio);
   c.indicacion = await data.indicacionActiva(req.cuentaId, c.id) || null;
+  c.sesiones = await data.sesionesDe(req.cuentaId, c.id);
   res.json(c);
 }));
 
@@ -2281,7 +2389,9 @@ app.post('/api/dias/:id/items', auth, ruta(async (req, res) => {
   const p = (req.body || {}).peso_sugerido;
   if (p !== undefined && p !== '' && p !== null && numeroEn(p, ...RANGOS.kg) === null)
     return res.status(400).json({ error: 'Ese peso de referencia no es válido.' });
-  const r = await data.agregarItem(req.cuentaId, req.params.id, req.body);
+  const pres = revisarPrescripcion(req.body);
+  if (pres.error) return res.status(400).json({ error: pres.error });
+  const r = await data.agregarItem(req.cuentaId, req.params.id, Object.assign({}, req.body, pres.valores));
   if (!r) return res.status(404).json({ error: 'No encontramos ese día o ese ejercicio.' });
   res.json(r);
 }));
@@ -2298,7 +2408,9 @@ app.patch('/api/items/:id', auth, ruta(async (req, res) => {
   const p = (req.body || {}).peso_sugerido;
   if (p !== undefined && p !== '' && p !== null && numeroEn(p, ...RANGOS.kg) === null)
     return res.status(400).json({ error: 'Ese peso de referencia no es válido.' });
-  if (!await data.editarItem(req.cuentaId, req.params.id, req.body))
+  const pres = revisarPrescripcion(req.body);
+  if (pres.error) return res.status(400).json({ error: pres.error });
+  if (!await data.editarItem(req.cuentaId, req.params.id, Object.assign({}, req.body, pres.valores)))
     return res.status(404).json({ error: 'No encontramos ese ejercicio en la rutina.' });
   res.json({ ok: true });
 }));
@@ -2490,7 +2602,9 @@ app.delete('/api/plantilla-dias/:id', auth, ruta(async (req, res) => {
 }));
 
 app.post('/api/plantilla-dias/:id/items', auth, ruta(async (req, res) => {
-  const r = await data.agregarItemPlantilla(req.cuentaId, req.params.id, req.body);
+  const pres = revisarPrescripcion(req.body);
+  if (pres.error) return res.status(400).json({ error: pres.error });
+  const r = await data.agregarItemPlantilla(req.cuentaId, req.params.id, Object.assign({}, req.body, pres.valores));
   if (!r) return res.status(404).json({ error: 'No encontramos ese día o ese ejercicio.' });
   res.json(r);
 }));
@@ -2504,7 +2618,9 @@ app.patch('/api/plantilla-dias/:id/orden', auth, ruta(async (req, res) => {
 }));
 
 app.patch('/api/plantilla-items/:id', auth, ruta(async (req, res) => {
-  if (!await data.editarItemPlantilla(req.cuentaId, req.params.id, req.body))
+  const pres = revisarPrescripcion(req.body);
+  if (pres.error) return res.status(400).json({ error: pres.error });
+  if (!await data.editarItemPlantilla(req.cuentaId, req.params.id, Object.assign({}, req.body, pres.valores)))
     return res.status(404).json({ error: 'No encontramos ese ejercicio.' });
   res.json({ ok: true });
 }));
@@ -2712,7 +2828,7 @@ app.delete('/api/admin/cuentas/:id', auth, soloAdmin, ruta(async (req, res) => {
   for (const t of ['seguimiento', 'series_log', 'rutina_items', 'rutina_dias', 'rutinas',
                    'plantilla_items', 'plantilla_dias', 'plantillas', 'turnos', 'clientes',
                    'ejercicios', 'grupos', 'mensajes', 'asistencias', 'observaciones', 'indicaciones',
-                   'pagos', 'recuperaciones'])
+                   'pagos', 'recuperaciones', 'sesiones'])
     await data.run(`DELETE FROM ${t} WHERE cuenta_id = ?`, [id]);
   await data.run('DELETE FROM cuentas WHERE id = ?', [id]);
   res.json({ ok: true });
@@ -2817,7 +2933,8 @@ app.get('/api/exportar', auth, ruta(async (req, res) => {
     'SELECT nombre, grupo, video_url FROM ejercicios WHERE cuenta_id = ?', [id]);
   const rutinas = await data.q(
     `SELECT c.nombre AS alumno, r.nombre AS rutina, d.nombre AS dia, d.dia_sugerido,
-            e.nombre AS ejercicio, i.series, i.reps, i.nota, i.peso_sugerido
+            e.nombre AS ejercicio, i.series, i.reps, i.nota, i.peso_sugerido,
+            i.descanso AS descanso_seg, i.intensidad, i.tempo, i.bloque AS superserie
        FROM rutina_items i
        JOIN rutina_dias d ON d.id = i.dia_id
        JOIN rutinas r ON r.id = d.rutina_id
@@ -2844,8 +2961,13 @@ app.get('/api/exportar', auth, ruta(async (req, res) => {
     `SELECT c.nombre AS alumno, p.fecha, p.monto, p.medio, p.vence AS plan_hasta, p.nota
        FROM pagos p JOIN clientes c ON c.id = p.cliente_id
       WHERE p.cuenta_id = ? ORDER BY p.fecha DESC`, [id]);
+  const sesiones = await data.q(
+    `SELECT c.nombre AS alumno, s.fecha, s.semana, d.nombre AS dia, s.esfuerzo, s.duracion AS minutos, s.nota
+       FROM sesiones s JOIN clientes c ON c.id = s.cliente_id
+       LEFT JOIN rutina_dias d ON d.id = s.dia_id
+      WHERE s.cuenta_id = ? ORDER BY s.fecha DESC`, [id]);
   res.json({ generado: ahora(), cuenta: req.cuenta.nombre,
-             clientes, ejercicios, rutinas, turnos, registros, seguimiento, pagos });
+             clientes, ejercicios, rutinas, turnos, registros, seguimiento, pagos, sesiones });
 }));
 
 app.get('/api/admin/mensajes', auth, soloAdmin, ruta(async (req, res) =>
@@ -2987,6 +3109,7 @@ app.get('/api/alumno/:token', ruta(async (req, res) => {
     // La planilla arranca limpia cada semana, pero lo anterior queda en el historial.
     series: await data.seriesDeLaSemana(c.cuenta_id, c.id, semana, c.inicio),
     observaciones: await data.observacionesDeLaSemana(c.cuenta_id, c.id, semana, c.inicio),
+    sesiones: await data.sesionesDeLaSemana(c.cuenta_id, c.id, semana, c.inicio),
     indicacion: indicacion || null,
     peso_hoy: (seguimiento.find(x => x.fecha === hoy()) || {}).peso || null,
     seguimiento
@@ -3038,6 +3161,27 @@ app.post('/api/alumno/:token/observacion', ruta(async (req, res) => {
   const r = await data.guardarObservacion(c, { item_id, ejercicio_id, texto });
   if (!r) return res.status(404).json({ error: 'No encontramos ese ejercicio en tu rutina.' });
   res.json({ observaciones: await data.observacionesDeLaSemana(c.cuenta_id, c.id, semanaDe(c.inicio), c.inicio) });
+}));
+
+// El alumno termina el entrenamiento del día y cuenta cómo le fue.
+app.post('/api/alumno/:token/sesion', ruta(async (req, res) => {
+  const c = await alumnoDelLink(req, res);
+  if (!c) return;
+  if (!limitar('ses:' + req.params.token, 60, 60))
+    return res.status(429).json({ error: 'Cerraste el entrenamiento muchas veces seguidas. Esperá un momento.' });
+  const { dia_id, esfuerzo, nota, duracion } = req.body || {};
+  if (!dia_id) return res.status(400).json({ error: 'No sabemos qué día de la rutina terminaste.' });
+  const esf = esfuerzo == null || esfuerzo === '' ? null : numeroEn(esfuerzo, 1, 10);
+  if (esfuerzo != null && esfuerzo !== '' && (esf === null || !Number.isInteger(esf)))
+    return res.status(400).json({ error: 'El esfuerzo va del 1 al 10.' });
+  const texto = String(nota || '').trim();
+  if (texto.length > 500) return res.status(400).json({ error: 'El comentario es muy largo. Contalo en menos palabras.' });
+  // La duración la mide el celular; si viene algo raro, no se guarda.
+  const minutos = numeroEn(duracion, 0, 600);
+  const r = await data.terminarSesion(c, { dia_id, esfuerzo: esf, nota: texto || null,
+    duracion: minutos === null ? null : Math.round(minutos) });
+  if (!r) return res.status(404).json({ error: 'No encontramos ese día en tu rutina.' });
+  res.json({ sesiones: await data.sesionesDeLaSemana(c.cuenta_id, c.id, semanaDe(c.inicio), c.inicio) });
 }));
 
 app.post('/api/alumno/:token/indicacion-leida', ruta(async (req, res) => {

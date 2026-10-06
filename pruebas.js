@@ -941,7 +941,9 @@ console.log('\n== PESO CORPORAL POR DIA ==');
 await call('/alumno/' + linkA + '/seguimiento', { method: 'POST', body: { peso: 80 } });
 await call('/alumno/' + linkA + '/seguimiento', { method: 'POST', body: { peso: 79.5 } });
 const vp = await call('/alumno/' + linkA);
-const hoyFecha = new Date().toISOString().slice(0, 10);
+// El día de Argentina, como el servidor: con UTC, después de las 21 h esta prueba fallaba.
+const hoyFecha = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Argentina/Buenos_Aires',
+  year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 check('queda un solo registro por dia',
   vp.data.seguimiento.filter(x => x.fecha === hoyFecha).length === 1);
 check('con el ultimo valor', vp.data.seguimiento.find(x => x.fecha === hoyFecha).peso === 79.5);

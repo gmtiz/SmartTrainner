@@ -32,9 +32,10 @@ node pruebas.js            # API general
 node pruebas-plan.js       # plan mensual, renovación, login (toca la base directo)
 node pruebas-seguridad.js  # importación, cookie de sesión, admin, marca propia
 node pruebas-negocio.js    # cobros, pantalla Hoy, reportes, app instalable (toca la base directo)
+node pruebas-entreno.js    # prescripción (descanso, RPE, tempo, superseries) y modo entrenando
 ```
 
-En PowerShell: `$env:TURSO_URL="file:test.db"; $env:JWT_SECRET="test123456"; $env:PORT=3210; npm start`. Antes de cada cambio en el backend, correr las cuatro, con la base de prueba borrada antes (`test.db*`): `pruebas.js` cuenta cuentas y alumnos y falla sobre una base usada. `pruebas-seguridad.js` firma sesiones con `JWT_SECRET`: tiene que ser el mismo que usa el servidor.
+En PowerShell: `$env:TURSO_URL="file:test.db"; $env:JWT_SECRET="test123456"; $env:PORT=3210; npm start`. Antes de cada cambio en el backend, correr las cinco, con la base de prueba borrada antes (`test.db*`): `pruebas.js` cuenta cuentas y alumnos y falla sobre una base usada. `pruebas-seguridad.js` firma sesiones con `JWT_SECRET`: tiene que ser el mismo que usa el servidor.
 
 **Node:** `@babel/core` 8 es solo ESM y `server.js` lo carga con `require()`. Eso necesita Node >= 20.19 o >= 22.12; con Node 20.17 el servidor no arranca (`ERR_REQUIRE_ESM`). En esta máquina hay Node 22.13 instalado con nvm.
 
@@ -48,6 +49,8 @@ En PowerShell: `$env:TURSO_URL="file:test.db"; $env:JWT_SECRET="test123456"; $en
 - Planes: vencen el mismo día del mes siguiente (`sumarMes`, con `dia_cobro` como ancla); se puede renovar `VENTANA_RENOVAR` (7) días antes.
 - Cobros: tabla `pagos`. `POST /api/clientes/:id/pagos` anota el pago y renueva el plan (`data.pagarPlan`: como `renovarPlan`, pero si paga por adelantado corre el vencimiento un mes sin cortar el ciclo). Con `renovar: false` solo anota la plata. Borrar un pago no toca el vencimiento. `clientes` guarda `precio` (cuota), `nacimiento`, `creado` (alta) y `baja` (la pone `borrarCliente`), que usan los reportes.
 - `GET /api/hoy` arma la pantalla de inicio (`data.tablero`). `GET /api/negocio?mes=AAAA-MM` devuelve la caja del mes para todos los planes, y `reportes` solo con `limites(plan).reportes` (plan completo).
+- Prescripción: `rutina_items` y `plantilla_items` tienen `descanso` (segundos, 0 a 900), `intensidad` (texto libre: "RPE 8", "RIR 2", "70%"), `tempo` y `bloque` (superserie, letra A a F; la misma letra va seguida). Se validan con `revisarPrescripcion()`; al editar, lo que no viene en el pedido se conserva. Toda copia de ítems (duplicar, renovar, plantilla ↔ rutina) tiene que llevar los cuatro con `extrasDe()`. La importación desde Excel todavía no los trae.
+- Modo entrenando: el alumno cierra el día con `POST /api/alumno/:token/sesion` (tabla `sesiones`, una por día de rutina y fecha; esfuerzo 1 a 10, comentario y minutos). El PT lo ve en la ficha (`sesiones`) y en Hoy. El temporizador, el sonido y la pantalla prendida (Wake Lock) viven solo en el frontend (`ModoEntreno`), y el avance se guarda en `localStorage` por 4 horas para retomar.
 - Recordatorios: el frontend arma links `wa.me` con el texto escrito (`MENSAJE`, `numeroWhatsApp` normaliza teléfonos argentinos). No hay envío automático ni API de WhatsApp.
 
 ## Seguridad (no romper)
